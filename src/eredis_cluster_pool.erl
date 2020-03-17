@@ -46,11 +46,12 @@ create(Host, Port) ->
 -spec transaction(PoolName::atom(), fun((Worker::pid()) -> redis_result())) ->
     redis_result().
 transaction(PoolName, Transaction) ->
-    try
-        poolboy:transaction(PoolName, Transaction)
-    catch
-        exit:_ ->
-            {error, no_connection}
+    try poolboy:transaction(PoolName, Transaction) catch
+      exit:_ ->
+	  case poolboy:status(PoolName) of
+	    {full, _, _, _} -> {error, full};
+	    {_, _, _, _} -> {error, no_connection}
+	  end
     end.
 
 -spec stop(PoolName::atom()) -> ok.

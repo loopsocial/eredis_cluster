@@ -196,7 +196,10 @@ handle_transaction_result(Result, Version) ->
         {error, no_connection} ->
             eredis_cluster_monitor:refresh_mapping(Version),
             retry;
-
+      % If poolboy connections used up and in a 'full` state, should just retry.
+      % Try calling refresh_mapping() will make the situation ever worse, and crash the system
+        {error, full} ->
+        retry;
         % If the tcp connection is closed (connection timeout), the redis worker
         % will try to reconnect, thus the connection should be recovered for
         % the next request. We don't need to refresh the slot mapping in this

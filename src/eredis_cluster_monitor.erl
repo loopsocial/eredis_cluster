@@ -35,7 +35,7 @@ connect(InitServers) ->
     gen_server:call(?MODULE,{connect,InitServers}).
 
 refresh_mapping(Version) ->
-    gen_server:call(?MODULE,{reload_slots_map,Version}).
+    gen_server:call(?MODULE,{reload_slots_map,Version}, 10000).
 
 %% =============================================================================
 %% @doc Given a slot return the link (Redis instance) to the mapped

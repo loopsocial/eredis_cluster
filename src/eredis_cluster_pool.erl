@@ -47,10 +47,12 @@ create(Host, Port) ->
     redis_result().
 transaction(PoolName, Transaction) ->
     try poolboy:transaction(PoolName, Transaction) catch
-      exit:{timeout,{gen_server,call,[_,{checkout,_,_},_]}} ->
-          {error, no_available_worker};
-      exit:_ ->
-          {error, no_connection}
+      exit:Exit ->
+        erlang:display([">>>>>>>>", Exit]),
+        case poolboy:status(PoolName) of
+          {full, _, _, _} -> {error, full};
+          {_, _, _, _} -> {error, no_connection}
+        end
     end.
 
 -spec stop(PoolName::atom()) -> ok.

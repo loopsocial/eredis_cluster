@@ -13,8 +13,7 @@ defmodule EredisCluster.Mixfile do
 
   def application do
     [mod: {:eredis_cluster, []},
-     applications: [:eredis, :poolboy],
-     env: [init_nodes: [{'127.0.0.1', 30001}], pool_size: 1, pool_max_overflow: 0]
+     applications: [:eredis, :poolboy]
     ]
   end
 

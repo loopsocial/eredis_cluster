@@ -1,5 +1,8 @@
 -module(eredis_cluster_pool).
 -behaviour(supervisor).
+-ifndef(DEBUG).
+    -define(DEBUG(Var), io:format("Debug --->: ~p:~p - ~p~n~n ~p~n~n", [?MODULE, ?LINE, ??Var, Var])).
+    -endif.
 
 %% API.
 -export([create/2]).
@@ -46,11 +49,17 @@ create(Host, Port) ->
 -spec transaction(PoolName::atom(), fun((Worker::pid()) -> redis_result())) ->
     redis_result().
 transaction(PoolName, Transaction) ->
+
+    ZZ = poolboy:status(PoolName),
+   erlang:display(["---------", ZZ]),
+
     try poolboy:transaction(PoolName, Transaction) catch
       exit:_ ->
 	  case poolboy:status(PoolName) of
-	    {full, _, _, _} -> {error, full};
-	    {_, _, _, _} -> {error, no_connection}
+        % {full, _, _, _} -> 
+        %     erlang:display("<<full>>>"), 
+        %         {error, full};
+	    {_, _, _, _} -> erlang:display("error--"), {error, no_connection}
 	  end
     end.
 

@@ -50,7 +50,7 @@ create(Host, Port) ->
 			   pid()) -> redis_result())) -> redis_result().
 
 transaction(PoolName, Transaction) ->
-	  erlang:display(["DEBUG0318:>>>", poolboy:status(PoolName)],
+	  erlang:display(["DEBUG0318:>>>", poolboy:status(PoolName)]),
     try poolboy:transaction(PoolName, Transaction) catch
       exit:Exit ->
 	  erlang:display(["DEBUG0318:>>>", Exit]),

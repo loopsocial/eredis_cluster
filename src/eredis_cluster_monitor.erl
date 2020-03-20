@@ -45,8 +45,23 @@ refresh_mapping(Version) ->
 
 -spec get_state() -> #state{}.
 get_state() ->
-    [{cluster_state, State}] = ets:lookup(?MODULE, cluster_state),
-    State.
+    get_state(5).
+
+-spec get_state(Counter::integer()) -> #state{}.
+get_state(0) ->
+    erlang:error(ets_down);
+
+get_state(Counter) ->
+    try
+        [{cluster_state, State}] = ets:lookup(?MODULE, cluster_state),
+        State
+    catch
+        error:badarg ->
+            %% Throttle retries
+            throttle_retries(Counter),
+            get_state(Counter - 1)
+    end.
+
 
 get_state_version(State) ->
     State#state.version.
@@ -166,6 +181,10 @@ close_connection(SlotsMap) ->
         true ->
             ok
     end.
+
+-spec throttle_retries(integer()) -> ok.
+throttle_retries(0) -> ok;
+throttle_retries(_) -> timer:sleep(100).
 
 -spec connect_node(#node{}) -> #node{} | undefined.
 connect_node(Node) ->

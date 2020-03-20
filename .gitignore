@@ -11,3 +11,6 @@ rel/example_project
 _build/
 priv/
 doc/
+.elixir_ls
+dump.rdb
+redis-git

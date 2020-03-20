@@ -89,8 +89,11 @@ transaction(Transaction, Slot, ExpectedValue, Counter) ->
 -spec qmn(redis_pipeline_command()) -> redis_pipeline_result().
 qmn(Commands) -> qmn(Commands, 0).
 
-qmn(_, ?REDIS_CLUSTER_REQUEST_TTL) -> 
-    {error, no_connection};
+qmn(_, ?REDIS_CLUSTER_REQUEST_TTL) ->
+Self = erlang:node(),
+error_logger:error_msg("[~p]~p:~p: query retry fails.", [Self, ?MODULE, ?LINE]),
+{error, 'eredis_cluster query retry fails'};
+
 qmn(Commands, Counter) ->
     %% Throttle retries
     throttle_retries(Counter),
@@ -106,7 +109,7 @@ qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc, Version) ->
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
     case handle_transaction_result(Result, Version, check_pipeline_result) of
         retry -> retry;
-        Res -> 
+        Res ->
             MappedRes = lists:zip(Mapping,Res),
             qmn2(T1, T2, MappedRes ++ Acc, Version)
     end;
@@ -184,18 +187,18 @@ query(Transaction, Slot, Counter) ->
     {Pool, Version} = eredis_cluster_monitor:get_pool_by_slot(Slot),
 
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
-    case handle_transaction_result(Result, Version) of 
+    case handle_transaction_result(Result, Version) of
         retry -> query(Transaction, Slot, Counter + 1);
         Result -> Result
     end.
 
 handle_transaction_result(Result, Version) ->
-    case Result of 
+    case Result of
         % If we detect a node went down, we should probably refresh the slot
         % mapping.
         {error, no_connection} ->
             % Commented out refresh_mapping as most of the no_connection error are not due to the node went down.
-            % In the case where the eredis under high load and returns error due to time out, calling 
+            % In the case where the eredis under high load and returns error due to time out, calling
             % refresh_mapping will further add more load the system.
             % eredis_cluster_monitor:refresh_mapping(Version),
             retry;

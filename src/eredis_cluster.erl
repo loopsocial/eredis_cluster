@@ -90,9 +90,9 @@ transaction(Transaction, Slot, ExpectedValue, Counter) ->
 qmn(Commands) -> qmn(Commands, 0).
 
 qmn(_, ?REDIS_CLUSTER_REQUEST_TTL) ->
-Self = erlang:node(),
-error_logger:error_msg("[~p]~p:~p: query retry fails.", [Self, ?MODULE, ?LINE]),
-{error, 'eredis_cluster query retry fails'};
+    Self = erlang:node(),
+    error_logger:error_msg("[~p]~p:~p: query retry fails.", [Self, ?MODULE, ?LINE]),
+    {error, 'eredis_cluster query retry fails'};
 
 qmn(Commands, Counter) ->
     %% Throttle retries
@@ -179,7 +179,9 @@ query(Command, PoolKey) ->
     query(Transaction, Slot, 0).
 
 query(_, _, ?REDIS_CLUSTER_REQUEST_TTL) ->
-    {error, no_connection};
+    Self = erlang:node(),
+    error_logger:error_msg("[~p]~p:~p: query retry fails.", [Self, ?MODULE, ?LINE]),
+    {error, 'eredis_cluster query retry fails'};
 query(Transaction, Slot, Counter) ->
     %% Throttle retries
     throttle_retries(Counter),

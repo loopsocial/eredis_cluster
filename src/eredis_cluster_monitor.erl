@@ -45,7 +45,7 @@ refresh_mapping(Version) ->
 
 -spec get_state() -> #state{}.
 get_state() ->
-    get_state(5).
+    get_state(?GET_STATE_TTL).
 
 -spec get_state(Counter::integer()) -> #state{}.
 get_state(0) ->

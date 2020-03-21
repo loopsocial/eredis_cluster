@@ -21,6 +21,7 @@
 -include("eredis_cluster.hrl").
 -record(state, {
     init_nodes :: [#node{}],
+    reloading :: boolean(),
     slots :: tuple(), %% whose elements are integer indexes into slots_maps
     slots_maps :: tuple(), %% whose elements are #slots_map{}
     version :: integer()
@@ -35,7 +36,11 @@ connect(InitServers) ->
     gen_server:call(?MODULE,{connect,InitServers}).
 
 refresh_mapping(Version) ->
-    gen_server:call(?MODULE,{reload_slots_map,Version}).
+    gen_server:cast(?MODULE,{reload_slots_map,Version}).
+
+set_reloading(#state{version=0}) -> ok;
+set_reloading(_) ->
+  gen_server:call(?MODULE,{set_reloading}).
 
 %% =============================================================================
 %% @doc Given a slot return the link (Redis instance) to the mapped
@@ -65,7 +70,7 @@ get_all_pools() ->
 %% =============================================================================
 -spec get_pool_by_slot(Slot::integer(), State::#state{}) ->
     {PoolName::atom() | undefined, Version::integer()}.
-get_pool_by_slot(Slot, State) -> 
+get_pool_by_slot(Slot, State) ->
     Index = element(Slot+1,State#state.slots),
     Cluster = element(Index,State#state.slots_maps),
     if
@@ -83,19 +88,21 @@ get_pool_by_slot(Slot) ->
 
 -spec reload_slots_map(State::#state{}) -> NewState::#state{}.
 reload_slots_map(State) ->
-    [close_connection(SlotsMap)
-        || SlotsMap <- tuple_to_list(State#state.slots_maps)],
+    set_reloading(State),
 
     ClusterSlots = get_cluster_slots(State#state.init_nodes),
-
     SlotsMaps = parse_cluster_slots(ClusterSlots),
+
+    [close_connection(SlotsMap)
+        || SlotsMap <- tuple_to_list(State#state.slots_maps)],
     ConnectedSlotsMaps = connect_all_slots(SlotsMaps),
     Slots = create_slots_cache(ConnectedSlotsMaps),
 
     NewState = State#state{
         slots = list_to_tuple(Slots),
         slots_maps = list_to_tuple(ConnectedSlotsMaps),
-        version = State#state.version + 1
+        version = State#state.version + 1,
+        reloading = false
     },
 
     true = ets:insert(?MODULE, [{cluster_state, NewState}]),
@@ -207,9 +214,9 @@ connect_(InitNodes) ->
         slots = undefined,
         slots_maps = {},
         init_nodes = [#node{address = A, port = P} || {A,P} <- InitNodes],
-        version = 0
+        version = 0,
+        reloading = false
     },
-
     reload_slots_map(State).
 
 %% gen_server.
@@ -219,14 +226,23 @@ init(_Args) ->
     InitNodes = application:get_env(eredis_cluster, init_nodes, []),
     {ok, connect_(InitNodes)}.
 
-handle_call({reload_slots_map,Version}, _From, #state{version=Version} = State) ->
-    {reply, ok, reload_slots_map(State)};
-handle_call({reload_slots_map,_}, _From, State) ->
-    {reply, ok, State};
+handle_call({set_reloading, true}, _From, State) ->
+    erlang:send_after(5000, self(), {set_reloading, false}),
+    {noreply, State#state{reloading = true}};
+handle_call({set_reloading, false}, _From, State) ->
+    {noreply, State#state{reloading = false}};
+
 handle_call({connect, InitServers}, _From, _State) ->
     {reply, ok, connect_(InitServers)};
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
+
+handle_cast({reload_slots_map,_}, #state{reloading=true} = State) ->
+    {noreply, State};
+handle_cast({reload_slots_map,Version}, #state{version=Version} = State) ->
+    {noreply, reload_slots_map(State)};
+handle_cast({reload_slots_map,_}, State) ->
+    {noreply, State};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.

@@ -42,7 +42,7 @@ query(Worker, Commands) ->
     gen_server:call(Worker, {'query', Commands}).
 
 handle_call({'query', _}, _From, #state{conn = undefined} = State) ->
-    error_logger:error_msg("DEBUG-2020-03-20>> eredis_cluster: eredis_cluster_pool_worker has undefined connection. Returning no_connection"),
+    erlang:display("DEBUG-2020-03-20>> eredis_cluster: eredis_cluster_pool_worker has undefined connection. Returning no_connection"),
     {reply, {error, no_connection}, State};
 handle_call({'query', [[X|_]|_] = Commands}, _From, #state{conn = Conn} = State)
     when is_list(X); is_binary(X) ->

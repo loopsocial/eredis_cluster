@@ -19,7 +19,7 @@ defmodule EredisCluster.Mixfile do
 
   defp deps do
     [{:poolboy, "1.5.2"},
-      {:eredis, "~> 1.2.0"},
+      {:eredis, github: "loopsocial/eredis", branch: "tcp-errors"},
       {:ex_doc, "~> 0.19.1"}]
   end
 

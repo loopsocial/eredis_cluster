@@ -184,17 +184,22 @@ query(Transaction, Slot, Counter) ->
     {Pool, Version} = eredis_cluster_monitor:get_pool_by_slot(Slot),
 
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
-    case handle_transaction_result(Result, Version) of 
+    case handle_transaction_result(Result, Version) of
         retry -> query(Transaction, Slot, Counter + 1);
         Result -> Result
     end.
 
 handle_transaction_result(Result, Version) ->
-    case Result of 
-       % If we detect a node went down, we should probably refresh the slot
+    case Result of
+        % If we detect a node went down, we should probably refresh the slot
         % mapping.
         {error, no_connection} ->
             eredis_cluster_monitor:refresh_mapping(Version),
+            retry;
+
+        % If all poolboy workers are busy, we will retry. We don't need to refresh the
+        % slot mapping in this case
+        {error, connection_pool_full} ->
             retry;
 
         % If the tcp connection is closed (connection timeout), the redis worker

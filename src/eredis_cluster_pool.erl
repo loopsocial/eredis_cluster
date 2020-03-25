@@ -49,8 +49,16 @@ transaction(PoolName, Transaction) ->
     try
         poolboy:transaction(PoolName, Transaction)
     catch
-        exit:_ ->
-            {error, no_connection}
+        exit:{timeout,{gen_server,call,[_,{checkout,_,_},_]}} ->
+                    Self = erlang:node(),
+                    Msg = ["eredis_cluster: Poolboy is FULL on ", Self],
+                    erlang:display(lists:concat(Msg)),
+                    {error, connection_pool_full};
+        exit:Reason ->
+                    Self = erlang:node(),
+                    Msg = ["eredis_cluster: Poolboy is NOT full and transaction exit due to ", Reason, " at node ", Self],
+                    erlang:display(lists:concat(Msg)),
+                    {error, no_connection}
     end.
 
 -spec stop(PoolName::atom()) -> ok.

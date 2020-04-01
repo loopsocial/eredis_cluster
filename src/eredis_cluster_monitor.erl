@@ -226,7 +226,9 @@ init(_Args) ->
     process_flag(trap_exit, true),
     ets:new(?MODULE, [public, set, named_table, {read_concurrency, true}]),
     InitNodes = application:get_env(eredis_cluster, init_nodes, []),
-    {ok, connect_(InitNodes)}.
+    State = connect_(InitNodes),
+    timer:sleep(20), % timer, receive or something else
+    {ok, State}.
 
 handle_call({connect, InitServers}, _From, _State) ->
     {reply, ok, connect_(InitServers)};

@@ -212,9 +212,10 @@ connect_(InitNodes) ->
         refresh_pid = undefined,
         awaiting_clients = []
     },
-    start_refresh_mapping(State).
+    reload_slots_map(State).
 
-start_refresh_mapping(State) ->
+-spec spawn_reload_slots_map(#state{}) -> #state{}.
+spawn_reload_slots_map(State) ->
     Me = self(),
     NewMapping = fun () -> erlang:send(Me, {new_mapping, reload_slots_map(State)}) end,
     RefreshPid = proc_lib:spawn_link(NewMapping),
@@ -227,7 +228,6 @@ init(_Args) ->
     ets:new(?MODULE, [public, set, named_table, {read_concurrency, true}]),
     InitNodes = application:get_env(eredis_cluster, init_nodes, []),
     State = connect_(InitNodes),
-    timer:sleep(20), % timer, receive or something else
     {ok, State}.
 
 handle_call({connect, InitServers}, _From, _State) ->
@@ -238,7 +238,7 @@ handle_call(refresh_mapping, From, State) ->
     State = State#state{awaiting_clients = [From|AwaitingClients]},
     State =
         case State#state.refresh_pid of
-            undefined -> start_refresh_mapping(State);
+            undefined -> spawn_reload_slots_map(State);
             _ -> State
         end,
 

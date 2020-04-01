@@ -196,12 +196,12 @@ handle_transaction_result(Result, Version) ->
         {error, <<"CLUSTERDOWN ", _/binary>>} -> refresh_and_retry(Version);
         {error, <<"MOVED ", _/binary>>}       -> refresh_and_retry(Version);
         {error, <<"ASK ", _/binary>>}         -> refresh_and_retry(Version);
-        {error, <<"TRYAGAIN ", _/binary>>}    -> refresh_and_retry(Version);
 
         % If the tcp connection is closed (connection timeout), the redis worker
         % will try to reconnect, thus the connection should be recovered for
         % the next requeste and we don't need to refresh the slot mapping
         {error, tcp_closed} -> retry;
+        {error, <<"TRYAGAIN ", _/binary>>}    -> retry;
 
         % Successful transactions and pool_empty error just return
         Payload -> Payload

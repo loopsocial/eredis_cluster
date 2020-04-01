@@ -56,6 +56,7 @@ transaction(PoolName, Transaction) ->
                     {error, pool_empty};
         exit:Reason ->
                     Self = erlang:node(),
+                    Reason = lists:flatten(io_lib:format('~0p', [Reason])),
                     Msg = ["eredis_cluster: Poolboy is NOT full and transaction exit due to ", Reason, " at node ", Self],
                     erlang:display(lists:concat(Msg)),
                     {error, no_connection}

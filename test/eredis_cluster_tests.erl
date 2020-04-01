@@ -3,6 +3,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(Setup, fun() -> eredis_cluster:start() end).
+
 -define(Clearnup, fun(_) -> eredis_cluster:stop() end).
 
 basic_test_() ->

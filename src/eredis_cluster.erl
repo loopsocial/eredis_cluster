@@ -89,7 +89,7 @@ transaction(Transaction, Slot, ExpectedValue, Counter) ->
 -spec qmn(redis_pipeline_command()) -> redis_pipeline_result().
 qmn(Commands) -> qmn(Commands, 0).
 
-qmn(_, ?REDIS_CLUSTER_REQUEST_TTL) -> 
+qmn(_, ?REDIS_RETRY_LIMIT) ->
     {error, no_connection};
 qmn(Commands, Counter) ->
     %% Throttle retries
@@ -175,7 +175,7 @@ query(Command, PoolKey) ->
     Transaction = fun(Worker) -> qw(Worker, Command) end,
     query(Transaction, Slot, 0).
 
-query(_, _, ?REDIS_CLUSTER_REQUEST_TTL) ->
+query(_, _, ?REDIS_RETRY_LIMIT) ->
     {error, no_connection};
 query(Transaction, Slot, Counter) ->
     %% Throttle retries
@@ -191,48 +191,41 @@ query(Transaction, Slot, Counter) ->
 
 handle_transaction_result(Result, Version) ->
     case Result of
-        % If we detect a node went down, we should probably refresh the slot
-        % mapping.
-        {error, no_connection} ->
-            eredis_cluster_monitor:refresh_mapping(Version),
-            retry;
-
-        % If all poolboy workers are busy, we will retry. We don't need to refresh the
-        % slot mapping in this case
-        {error, connection_pool_full} ->
-            retry;
+        % If instance down or cluster down or keys were moved we refresh
+        {error, no_connection}                -> refresh_and_retry(Version);
+        {error, <<"CLUSTERDOWN ", _/binary>>} -> refresh_and_retry(Version);
+        {error, <<"MOVED ", _/binary>>}       -> refresh_and_retry(Version);
+        {error, <<"ASK ", _/binary>>}         -> refresh_and_retry(Version);
+        {error, <<"TRYAGAIN ", _/binary>>}    -> refresh_and_retry(Version);
 
         % If the tcp connection is closed (connection timeout), the redis worker
         % will try to reconnect, thus the connection should be recovered for
-        % the next request. We don't need to refresh the slot mapping in this
-        % case
-        {error, tcp_closed} ->
-            retry;
+        % the next requeste and we don't need to refresh the slot mapping
+        {error, tcp_closed} -> retry;
 
-        % Redis explicitly say our slot mapping is incorrect, we need to refresh
-        % it
-        {error, <<"MOVED ", _/binary>>} ->
-            eredis_cluster_monitor:refresh_mapping(Version),
-            retry;
-
-        Payload ->
-            Payload
+        % Successful transactions and pool_empty error just return
+        Payload -> Payload
     end.
 handle_transaction_result(Result, Version, check_pipeline_result) ->
     case handle_transaction_result(Result, Version) of
        retry -> retry;
        Payload when is_list(Payload) ->
-           Pred = fun({error, <<"MOVED ", _/binary>>}) -> true;
-                    (_) -> false
-                 end,
+           Pred = fun({error, <<"CLUSTERDOWN ", _/binary>>}) -> true;
+                     ({error, <<"MOVED ", _/binary>>}) -> true;
+                     ({error, <<"ASK ", _/binary>>}) -> true;
+                     ({error, <<"TRYAGAIN ", _/binary>>}) -> true;
+                     (_) -> false
+                  end,
            case lists:any(Pred, Payload) of
-               false -> Payload;
-               true ->
-                   eredis_cluster_monitor:refresh_mapping(Version),
-                   retry
+               true -> refresh_and_retry(Version);
+               false -> Payload
            end;
        Payload -> Payload
     end.
+
+refresh_and_retry(Version) ->
+    eredis_cluster_monitor:refresh_mapping(Version),
+    retry.
 
 -spec throttle_retries(integer()) -> ok.
 throttle_retries(0) -> ok;

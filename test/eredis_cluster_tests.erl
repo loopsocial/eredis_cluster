@@ -2,7 +2,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--define(Setup, fun() -> eredis_cluster:start() end).
+-define(Setup, fun() -> eredis_cluster:start(), timer:sleep(20) end).
+
 -define(Clearnup, fun(_) -> eredis_cluster:stop() end).
 
 basic_test_() ->

@@ -23,7 +23,9 @@
     init_nodes :: [#node{}],
     slots :: tuple(), %% whose elements are integer indexes into slots_maps
     slots_maps :: tuple(), %% whose elements are #slots_map{}
-    version :: integer()
+    version :: integer(),
+    refresh_pid :: pid(),
+    awaiting_clients :: [{pid(),term()}]
 }).
 
 %% API.
@@ -34,12 +36,8 @@ start_link() ->
 connect(InitServers) ->
     gen_server:call(?MODULE,{connect,InitServers}).
 
-refresh_mapping(Version) ->
-    refresh_mapping(Version, gen_server:call(?MODULE,{lock_reload})).
-refresh_mapping(_, error) ->
-    error;
-refresh_mapping(Version, ok) ->
-    gen_server:cast(?MODULE,{reload_slots_map,Version}),
+refresh_mapping(_Version) ->
+    gen_server:call(?MODULE,refresh_mapping,infinity),
     ok.
 
 %% =============================================================================
@@ -104,7 +102,6 @@ reload_slots_map(State) ->
     },
 
     true = ets:insert(?MODULE, [{cluster_state, NewState}]),
-    true = ets:delete(?MODULE, reloading),
 
     NewState.
 
@@ -183,11 +180,9 @@ connect_node(Node) ->
     end.
 
 safe_eredis_start_link(Address,Port) ->
-    process_flag(trap_exit, true),
     DataBase = application:get_env(eredis_cluster, database, 0),
     Password = application:get_env(eredis_cluster, password, ""),
     Payload = eredis:start_link(Address, Port, DataBase, Password),
-    process_flag(trap_exit, false),
     Payload.
 
 -spec create_slots_cache([#slots_map{}]) -> [integer()].
@@ -213,46 +208,65 @@ connect_(InitNodes) ->
         slots = undefined,
         slots_maps = {},
         init_nodes = [#node{address = A, port = P} || {A,P} <- InitNodes],
-        version = 0
+        version = 0,
+        refresh_pid = undefined,
+        awaiting_clients = []
     },
-    reload_slots_map(State).
+    start_refresh_mapping(State).
+
+start_refresh_mapping(State) ->
+    Me = self(),
+    NewMapping = fun () -> erlang:send(Me, {new_mapping, reload_slots_map(State)}) end,
+    RefreshPid = proc_lib:spawn_link(NewMapping),
+    State#state{refresh_pid = RefreshPid}.
 
 %% gen_server.
 
 init(_Args) ->
-    ets:new(?MODULE, [protected, set, named_table, {read_concurrency, true}]),
+    process_flag(trap_exit, true),
+    ets:new(?MODULE, [public, set, named_table, {read_concurrency, true}]),
     InitNodes = application:get_env(eredis_cluster, init_nodes, []),
     {ok, connect_(InitNodes)}.
 
-handle_call({lock_reload}, _From, State) ->
-    case ets:lookup(?MODULE, reloading) of
-      [{reloading, true}] ->
-        {reply, error, State};
-      [] ->
-        ets:insert(?MODULE, [{reloading, true}]),
-        % allow new reload_slots_map calls after 5s (or if it finishes before)
-        erlang:send_after(5000, self(), {unlock_reload}),
-        {reply, ok, State}
-    end;
-
 handle_call({connect, InitServers}, _From, _State) ->
     {reply, ok, connect_(InitServers)};
-handle_call(_Request, _From, State) ->
-    {reply, ignored, State}.
 
-handle_cast({reload_slots_map,Version}, #state{version=Version} = State) ->
-    {noreply, reload_slots_map(State)};
-handle_cast({reload_slots_map,_}, State) ->
+handle_call(refresh_mapping, From, State) ->
+    AwaitingClients = State#state.awaiting_clients,
+    State = State#state{awaiting_clients = [From|AwaitingClients]},
+    State =
+        case State#state.refresh_pid of
+            undefined -> start_refresh_mapping(State);
+            _ -> State
+        end,
+
+    % Note that we're not replying immediately. Instead, the response will be
+    % sent once the refresh mapping is done, from handle_info on normal EXIT.
     {noreply, State};
 
+handle_call(_Request, _From, State) ->
+    {reply, ignored, State}.
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({unlock_reload}, State) ->
-    ets:delete(?MODULE, reloading),
-    {noreply, State};
+handle_info({new_mapping, NewState}, _State) ->
+    {noreply, NewState};
+handle_info({'EXIT', RefreshPid, Reason}, #state{refresh_pid=RefreshPid} = State) ->
+    reply_on_exit(State#state.awaiting_clients, Reason),
+    {noreply, State#state{refresh_pid = undefined, awaiting_clients = []}};
 handle_info(_Info, State) ->
     {noreply, State}.
+
+reply_on_exit(AwaitingClients, normal) ->
+    reply_refresh_mapping(AwaitingClients, ok);
+reply_on_exit(AwaitingClients, _ExitReason) ->
+    reply_refresh_mapping(AwaitingClients, error).
+
+reply_refresh_mapping([], Response) -> Response;
+reply_refresh_mapping([Client|ClientList], Response) ->
+    {FromPid, FromTag} = Client,
+    erlang:send(FromPid, {FromTag, Response}),
+    reply_refresh_mapping(ClientList, Response).
 
 terminate(_Reason, _State) ->
     ok.

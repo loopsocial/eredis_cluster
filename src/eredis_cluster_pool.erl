@@ -50,12 +50,14 @@ transaction(PoolName, Transaction) ->
         poolboy:transaction(PoolName, Transaction)
     catch
         exit:{timeout,{gen_server,call,[_,{checkout,_,_},_]}} ->
-                    {error, pool_empty};
-        exit:Reason ->
-                    Self = erlang:node(),
-                    % TODO: test or don't commit
-                    error_logger:info_msg("eredis_cluster: Poolboy exit on ~p due to ~0p", [Self, Reason]),
-                    {error, no_connection}
+            erlang:display("poolboy empty"),
+            {error, pool_empty};
+        exit:_Reason ->
+            % TODO use new logger
+            % Self = erlang:node(),
+            % error_logger:info_msg("eredis_cluster: Poolboy exit on ~p due to ~0p", [Self, Reason]),
+            erlang:display("poolboy exit"),
+            {error, no_connection}
     end.
 
 -spec stop(PoolName::atom()) -> ok.

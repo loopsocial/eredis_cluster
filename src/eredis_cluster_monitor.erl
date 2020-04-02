@@ -5,6 +5,7 @@
 -export([start_link/0]).
 -export([connect/1]).
 -export([refresh_mapping/1]).
+-export([async_refresh_mapping/1]).
 -export([get_state/0, get_state_version/1]).
 -export([get_pool_by_slot/1, get_pool_by_slot/2]).
 -export([get_all_pools/0]).
@@ -34,10 +35,14 @@ start_link() ->
     gen_server:start_link({local,?MODULE}, ?MODULE, [], []).
 
 connect(InitServers) ->
-    gen_server:call(?MODULE,{connect,InitServers}).
+    gen_server:call(?MODULE, {connect, InitServers}).
 
 refresh_mapping(_Version) ->
-    gen_server:call(?MODULE,refresh_mapping,infinity),
+    gen_server:call(?MODULE, refresh_mapping, infinity),
+    ok.
+
+async_refresh_mapping(_Version) ->
+    gen_server:cast(?MODULE, refresh_mapping),
     ok.
 
 %% =============================================================================
@@ -248,6 +253,12 @@ handle_call(refresh_mapping, From, State) ->
 
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
+
+handle_cast(refresh_mapping, #state{refresh_pid = undefined} = State) ->
+  {noreply, spawn_reload_slots_map(State)};
+handle_cast(refresh_mapping, #state{refresh_pid = _} = State) ->
+  {noreply, State};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 

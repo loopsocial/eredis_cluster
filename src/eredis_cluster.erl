@@ -92,13 +92,14 @@ qmn(Commands) -> qmn(Commands, 0).
 qmn(_, ?REDIS_RETRY_LIMIT) ->
     {error, no_connection};
 qmn(Commands, Counter) ->
-    %% Throttle retries
-    throttle_retries(Counter),
-
     {CommandsByPools, MappingInfo, Version} = split_by_pools(Commands),
+
     case qmn2(CommandsByPools, MappingInfo, [], Version) of
-        retry -> qmn(Commands, Counter + 1);
-        Res -> Res
+        retry ->
+            timer:sleep(?REDIS_RETRY_DELAY),
+            qmn(Commands, Counter + 1);
+        Res ->
+            Res
     end.
 
 qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc, Version) ->
@@ -178,30 +179,57 @@ query(Command, PoolKey) ->
 query(_, _, ?REDIS_RETRY_LIMIT) ->
     {error, no_connection};
 query(Transaction, Slot, Counter) ->
-    %% Throttle retries
-    throttle_retries(Counter),
-
     {Pool, Version} = eredis_cluster_monitor:get_pool_by_slot(Slot),
+    Result = try_query(Pool, Version, Transaction),
 
-    Result = eredis_cluster_pool:transaction(Pool, Transaction),
     case handle_transaction_result(Result, Version) of
         retry -> query(Transaction, Slot, Counter + 1);
-        Result -> Result
+        Payload -> Payload
+    end.
+
+try_query(Pool, Version, Transaction) ->
+    Result = eredis_cluster_pool:transaction(Pool, Transaction),
+
+    case Result of
+        % When a redirection is encountered, it is likely multiple slots
+        % were reconfigured rather than just one, so updating the client
+        % configuration as soon as possible is often the best strategy
+        % https://redis.io/topics/cluster-spec
+        {error, <<"MOVED ", SlotAddressPort/binary>>} ->
+            erlang:display("MOVED"),
+            eredis_cluster_monitor:async_refresh_mapping(Version),
+            try_redirect(SlotAddressPort, Transaction);
+
+        % ASK is like MOVED but the difference is that the client should retry
+        % against on new instance only this query, not next queries. That means:
+        % smart clients should not update internal state
+        % https://redis.io/presentation/Redis_Cluster.pdf
+        {error, <<"ASK ", SlotAddressPort/binary>>} ->
+            erlang:display("ASK"),
+            try_redirect(SlotAddressPort, Transaction);
+
+        Payload ->
+            Payload
     end.
 
 handle_transaction_result(Result, Version) ->
     case Result of
-        % If instance down or cluster down or keys were moved we refresh
-        {error, no_connection}                -> refresh_and_retry(Version);
-        {error, <<"CLUSTERDOWN ", _/binary>>} -> refresh_and_retry(Version);
-        {error, <<"MOVED ", _/binary>>}       -> refresh_and_retry(Version);
-        {error, <<"ASK ", _/binary>>}         -> refresh_and_retry(Version);
+        % If instance down we wait refresh finish and retry
+        {error, no_connection} ->
+            erlang:display("no_connection"),
+            eredis_cluster_monitor:refresh_mapping(Version),
+            retry;
 
-        % If the tcp connection is closed (connection timeout), the redis worker
-        % will try to reconnect, thus the connection should be recovered for
-        % the next requeste and we don't need to refresh the slot mapping
-        {error, tcp_closed} -> retry;
-        {error, <<"TRYAGAIN ", _/binary>>}    -> retry;
+        % If pool is empty, retry or refresh will make it worse
+        {error, pool_empty} ->
+            erlang:display("pool_empty"),
+            {error, pool_empty};
+
+        % If any other error we sleep and retry
+        {error, Reason} ->
+            error_logger:error_msg("Redis Cluster Retry: ~p", [Reason]),
+            timer:sleep(?REDIS_RETRY_DELAY),
+            retry;
 
         % Successful transactions and pool_empty error just return
         Payload -> Payload
@@ -210,26 +238,29 @@ handle_transaction_result(Result, Version, check_pipeline_result) ->
     case handle_transaction_result(Result, Version) of
        retry -> retry;
        Payload when is_list(Payload) ->
-           Pred = fun({error, <<"CLUSTERDOWN ", _/binary>>}) -> true;
-                     ({error, <<"MOVED ", _/binary>>}) -> true;
-                     ({error, <<"ASK ", _/binary>>}) -> true;
-                     ({error, <<"TRYAGAIN ", _/binary>>}) -> true;
+           Pred = fun({error, <<"MOVED ", _/binary>>}) -> true;
                      (_) -> false
                   end,
            case lists:any(Pred, Payload) of
-               true -> refresh_and_retry(Version);
-               false -> Payload
+               true ->
+                   eredis_cluster_monitor:refresh_mapping(Version),
+                   retry;
+               false ->
+                   Payload
            end;
        Payload -> Payload
     end.
 
-refresh_and_retry(Version) ->
-    eredis_cluster_monitor:refresh_mapping(Version),
-    retry.
+try_redirect(SlotAddressPort, Transaction) ->
+    [Address, Port] = get_address_port(SlotAddressPort),
+    case eredis_cluster_pool:create(Address, Port) of
+        {ok, Pool} -> eredis_cluster_pool:transaction(Pool, Transaction);
+        _ -> retry
+    end.
 
--spec throttle_retries(integer()) -> ok.
-throttle_retries(0) -> ok;
-throttle_retries(_) -> timer:sleep(?REDIS_RETRY_DELAY).
+get_address_port(SlotAddressPort) ->
+    [_Slot, AddressPort | _] = string:split(binary_to_list(SlotAddressPort), " "),
+    string:split(AddressPort, ":").
 
 %% =============================================================================
 %% @doc Update the value of a key by applying the function passed in the

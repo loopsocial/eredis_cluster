@@ -50,13 +50,10 @@ transaction(PoolName, Transaction) ->
         poolboy:transaction(PoolName, Transaction)
     catch
         exit:{timeout,{gen_server,call,[_,{checkout,_,_},_]}} ->
-            erlang:display("poolboy empty"),
+            eredis_cluster:log_error(["Poolboy is EMPTY on node ~p", [erlang:node()]]),
             {error, pool_empty};
-        exit:_Reason ->
-            % TODO use new logger
-            % Self = erlang:node(),
-            % error_logger:info_msg("eredis_cluster: Poolboy exit on ~p due to ~0p", [Self, Reason]),
-            erlang:display("poolboy exit"),
+        exit:Reason ->
+            eredis_cluster:log_error(["Poolboy exited on node ~p because:\n~p", [erlang:node(), Reason]]),
             {error, no_connection}
     end.
 

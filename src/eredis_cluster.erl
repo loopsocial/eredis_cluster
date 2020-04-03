@@ -19,6 +19,7 @@
 -export([update_hash_field/3]).
 -export([optimistic_locking_transaction/3]).
 -export([eval/4]).
+-export([log_error/1]).
 
 -include("eredis_cluster.hrl").
 
@@ -89,17 +90,15 @@ transaction(Transaction, Slot, ExpectedValue, Counter) ->
 -spec qmn(redis_pipeline_command()) -> redis_pipeline_result().
 qmn(Commands) -> qmn(Commands, 0).
 
-qmn(_, ?REDIS_RETRY_LIMIT) ->
+qmn(_, ?RETRY_LIMIT) ->
     {error, no_connection};
 qmn(Commands, Counter) ->
+    exponential_backoff(Counter),
     {CommandsByPools, MappingInfo, Version} = split_by_pools(Commands),
 
     case qmn2(CommandsByPools, MappingInfo, [], Version) of
-        retry ->
-            timer:sleep(?REDIS_RETRY_DELAY),
-            qmn(Commands, Counter + 1);
-        Res ->
-            Res
+        retry -> qmn(Commands, Counter + 1);
+        Res -> Res
     end.
 
 qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc, Version) ->
@@ -176,9 +175,11 @@ query(Command, PoolKey) ->
     Transaction = fun(Worker) -> qw(Worker, Command) end,
     query(Transaction, Slot, 0).
 
-query(_, _, ?REDIS_RETRY_LIMIT) ->
+query(_, _, ?RETRY_LIMIT) ->
     {error, no_connection};
 query(Transaction, Slot, Counter) ->
+    exponential_backoff(Counter),
+
     {Pool, Version} = eredis_cluster_monitor:get_pool_by_slot(Slot),
     Result = try_query(Pool, Version, Transaction),
 
@@ -228,7 +229,6 @@ handle_transaction_result(Result, Version) ->
         % If any other error we sleep and retry
         {error, Reason} ->
             error_logger:error_msg("Redis Cluster Retry: ~p", [Reason]),
-            timer:sleep(?REDIS_RETRY_DELAY),
             retry;
 
         % Successful transactions and pool_empty error just return
@@ -261,6 +261,11 @@ try_redirect(SlotAddressPort, Transaction) ->
 get_address_port(SlotAddressPort) ->
     [_Slot, AddressPort | _] = string:split(binary_to_list(SlotAddressPort), " "),
     string:split(AddressPort, ":").
+
+exponential_backoff(0) -> ok;
+exponential_backoff(Counter) ->
+    Time = trunc(math:pow(?EXPONENTIAL_BACKOFF_BASE, Counter)),
+    timer:sleep(Time).
 
 %% =============================================================================
 %% @doc Update the value of a key by applying the function passed in the
@@ -483,3 +488,10 @@ get_key_from_rest([_,KeyName|_]) when is_list(KeyName) ->
     KeyName;
 get_key_from_rest(_) ->
     undefined.
+
+-spec log_error([term()]) -> ok.
+log_error(Attrs) ->
+    case application:get_env(eredis_cluster, logger, true) of
+        true -> erlang:apply(logger, error, Attrs);
+        false -> ok
+    end.

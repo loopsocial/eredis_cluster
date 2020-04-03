@@ -264,7 +264,6 @@ handle_cast(_Msg, State) ->
 handle_info({new_mapping, NewState}, State) ->
     reply_awaiting_clients(State#state.awaiting_clients),
     {noreply, NewState#state{refresh_pid = undefined, awaiting_clients = []}};
-
 handle_info(_Info, State) ->
     {noreply, State}.
 

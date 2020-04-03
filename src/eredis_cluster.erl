@@ -226,9 +226,9 @@ handle_transaction_result(Result, Version) ->
             erlang:display("pool_empty"),
             {error, pool_empty};
 
-        % If any other error we sleep and retry
+        % If any other error we retry
         {error, Reason} ->
-            error_logger:error_msg("Redis Cluster Retry: ~p", [Reason]),
+            log_error(["Redis Cluster Error: ~p", [Reason]]),
             retry;
 
         % Successful transactions and pool_empty error just return

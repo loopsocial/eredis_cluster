@@ -163,8 +163,37 @@ basic_test_() ->
                 eredis_cluster:eval(Script, ScriptHash, ["qrs"], ["evaltest"]),
                 ?assertEqual({ok, <<"evaltest">>}, eredis_cluster:q(["get", "qrs"]))
             end
-            }
+            },
 
-      ]
+            { "start eredis_cluster_monitor asynchronously",
+            fun() ->
+                eredis_cluster:stop(),
+                eredis_cluster:start(),
+                ?assertMatch(
+                    {state, undefined, _, _, _, _, _},
+                    eredis_cluster_monitor:get_state()),
+                ?assertEqual({ok, <<"OK">>}, eredis_cluster:q(["SET", "test", "success"])),
+
+                eredis_cluster:stop(),
+                eredis_cluster:start(),
+                ?assertEqual({ok, <<"success">>}, eredis_cluster:q(["GET", "test"]))
+            end
+            },
+
+            { "fault tolerance",
+            fun() ->
+                exit(whereis(eredis_cluster_monitor), kill),
+                timer:sleep(10),
+                ?assertEqual({ok, <<"OK">>}, eredis_cluster:q(["SET", "test", "success"])),
+
+                eredis_cluster:stop(),
+                eredis_cluster:start(),
+
+                exit(whereis(eredis_cluster_pool), kill),
+                timer:sleep(10),
+                ?assertEqual({ok, <<"success">>}, eredis_cluster:q(["GET", "test"]))
+            end
+            }
+        ]
     }
 }.

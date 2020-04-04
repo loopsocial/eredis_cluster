@@ -94,23 +94,23 @@ qmn(_, ?RETRY_LIMIT) ->
     {error, no_connection};
 qmn(Commands, Counter) ->
     exponential_backoff(Counter),
-    {CommandsByPools, MappingInfo, Version} = split_by_pools(Commands),
+    {CommandsByPools, MappingInfo} = split_by_pools(Commands),
 
-    case qmn2(CommandsByPools, MappingInfo, [], Version) of
+    case qmn2(CommandsByPools, MappingInfo, []) of
         retry -> qmn(Commands, Counter + 1);
         Res -> Res
     end.
 
-qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc, Version) ->
+qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc) ->
     Transaction = fun(Worker) -> qw(Worker, PoolCommands) end,
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
-    case handle_transaction_result(Result, Version, check_pipeline_result) of
+    case handle_transaction_result(Result, check_pipeline_result) of
         retry -> retry;
         Res -> 
             MappedRes = lists:zip(Mapping,Res),
-            qmn2(T1, T2, MappedRes ++ Acc, Version)
+            qmn2(T1, T2, MappedRes ++ Acc)
     end;
-qmn2([], [], Acc, _) ->
+qmn2([], [], Acc) ->
     SortedAcc =
         lists:sort(
             fun({Index1, _},{Index2, _}) ->
@@ -125,7 +125,7 @@ split_by_pools(Commands) ->
 split_by_pools([Command | T], Index, CmdAcc, MapAcc, State) ->
     Key = get_key_from_command(Command),
     Slot = get_key_slot(Key),
-    {Pool, _Version} = eredis_cluster_monitor:get_pool_by_slot(Slot, State),
+    Pool = eredis_cluster_monitor:get_pool_by_slot(Slot, State),
     {NewAcc1, NewAcc2} =
         case lists:keyfind(Pool, 1, CmdAcc) of
             false ->
@@ -139,10 +139,10 @@ split_by_pools([Command | T], Index, CmdAcc, MapAcc, State) ->
                 {[{Pool, CmdList2} | CmdAcc2], [{Pool, MapList2} | MapAcc2]}
         end,
     split_by_pools(T, Index+1, NewAcc1, NewAcc2, State);
-split_by_pools([], _Index, CmdAcc, MapAcc, State) ->
+split_by_pools([], _Index, CmdAcc, MapAcc, _State) ->
     CmdAcc2 = [{Pool, lists:reverse(Commands)} || {Pool, Commands} <- CmdAcc],
     MapAcc2 = [{Pool, lists:reverse(Mapping)} || {Pool, Mapping} <- MapAcc],
-    {CmdAcc2, MapAcc2, eredis_cluster_monitor:get_state_version(State)}.
+    {CmdAcc2, MapAcc2}.
 
 %% =============================================================================
 %% @doc Wrapper function for command using pipelined commands
@@ -180,15 +180,15 @@ query(_, _, ?RETRY_LIMIT) ->
 query(Transaction, Slot, Counter) ->
     exponential_backoff(Counter),
 
-    {Pool, Version} = eredis_cluster_monitor:get_pool_by_slot(Slot),
-    Result = try_query(Pool, Version, Transaction),
+    Pool = eredis_cluster_monitor:get_pool_by_slot(Slot),
+    Result = try_query(Pool, Transaction),
 
-    case handle_transaction_result(Result, Version) of
+    case handle_transaction_result(Result) of
         retry -> query(Transaction, Slot, Counter + 1);
         Payload -> Payload
     end.
 
-try_query(Pool, Version, Transaction) ->
+try_query(Pool, Transaction) ->
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
 
     case Result of
@@ -198,7 +198,7 @@ try_query(Pool, Version, Transaction) ->
         % https://redis.io/topics/cluster-spec
         {error, <<"MOVED ", SlotAddressPort/binary>>} ->
             erlang:display("MOVED"),
-            eredis_cluster_monitor:async_refresh_mapping(Version),
+            eredis_cluster_monitor:async_refresh_mapping(),
             try_redirect(SlotAddressPort, Transaction);
 
         % ASK is like MOVED but the difference is that the client should retry
@@ -213,12 +213,12 @@ try_query(Pool, Version, Transaction) ->
             Payload
     end.
 
-handle_transaction_result(Result, Version) ->
+handle_transaction_result(Result) ->
     case Result of
         % If instance down we wait refresh finish and retry
         {error, no_connection} ->
             erlang:display("no_connection"),
-            eredis_cluster_monitor:refresh_mapping(Version),
+            eredis_cluster_monitor:refresh_mapping(),
             retry;
 
         % If pool is empty, retry or refresh will make it worse
@@ -234,8 +234,8 @@ handle_transaction_result(Result, Version) ->
         % Successful transactions and pool_empty error just return
         Payload -> Payload
     end.
-handle_transaction_result(Result, Version, check_pipeline_result) ->
-    case handle_transaction_result(Result, Version) of
+handle_transaction_result(Result, check_pipeline_result) ->
+    case handle_transaction_result(Result) of
        retry -> retry;
        Payload when is_list(Payload) ->
            Pred = fun({error, <<"MOVED ", _/binary>>}) -> true;
@@ -243,7 +243,7 @@ handle_transaction_result(Result, Version, check_pipeline_result) ->
                   end,
            case lists:any(Pred, Payload) of
                true ->
-                   eredis_cluster_monitor:refresh_mapping(Version),
+                   eredis_cluster_monitor:refresh_mapping(),
                    retry;
                false ->
                    Payload

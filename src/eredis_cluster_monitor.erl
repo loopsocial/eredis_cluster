@@ -4,9 +4,9 @@
 %% API.
 -export([start_link/0]).
 -export([connect/1]).
--export([refresh_mapping/1]).
--export([async_refresh_mapping/1]).
--export([get_state/0, get_state_version/1]).
+-export([refresh_mapping/0]).
+-export([async_refresh_mapping/0]).
+-export([get_state/0]).
 -export([get_pool_by_slot/1, get_pool_by_slot/2]).
 -export([get_all_pools/0]).
 
@@ -25,7 +25,6 @@
     init_nodes :: [#node{}],
     slots :: tuple(), %% whose elements are integer indexes into slots_maps
     slots_maps :: tuple(), %% whose elements are #slots_map{}
-    version :: integer(),
     refresh_pid :: pid(),
     refresh_callers :: [{pid(),term()}]
 }).
@@ -38,11 +37,11 @@ start_link() ->
 connect(InitServers) ->
     gen_server:call(?MODULE, {connect, InitServers}).
 
-refresh_mapping(_Version) ->
+refresh_mapping() ->
     gen_server:call(?MODULE, refresh_mapping, infinity),
     ok.
 
-async_refresh_mapping(_Version) ->
+async_refresh_mapping() ->
     gen_server:cast(?MODULE, refresh_mapping),
     ok.
 
@@ -59,9 +58,6 @@ get_state() ->
       [] -> #state{}
     end.
 
-get_state_version(State) ->
-    State#state.version.
-
 -spec get_all_pools() -> [pid()].
 get_all_pools() ->
     State = get_state(),
@@ -75,21 +71,21 @@ get_all_pools() ->
 %% @end
 %% =============================================================================
 -spec get_pool_by_slot(Slot::integer(), State::#state{}) ->
-    {PoolName::atom() | undefined, Version::integer()}.
-get_pool_by_slot(_Slot, #state{slots = undefined} = State) ->
-    {undefined, State#state.version};
+    PoolName::atom() | undefined.
+get_pool_by_slot(_Slot, #state{slots = undefined}) ->
+    undefined;
 get_pool_by_slot(Slot, State) ->
     Index = element(Slot+1,State#state.slots),
     Cluster = element(Index,State#state.slots_maps),
     if
         Cluster#slots_map.node =/= undefined ->
-            {Cluster#slots_map.node#node.pool, State#state.version};
+            Cluster#slots_map.node#node.pool;
         true ->
-            {undefined, State#state.version}
+            undefined
     end.
 
 -spec get_pool_by_slot(Slot::integer()) ->
-    {PoolName::atom() | undefined, Version::integer()}.
+    PoolName::atom() | undefined.
 get_pool_by_slot(Slot) ->
     State = get_state(),
     get_pool_by_slot(Slot, State).
@@ -108,8 +104,7 @@ reload_slots_map(State) ->
 
     NewState = State#state{
         slots = list_to_tuple(Slots),
-        slots_maps = list_to_tuple(ConnectedSlotsMaps),
-        version = State#state.version + 1
+        slots_maps = list_to_tuple(ConnectedSlotsMaps)
     },
 
     true = ets:insert(?MODULE, [{cluster_state, NewState}]),
@@ -246,10 +241,10 @@ handle_info({'EXIT', RefreshPid, Reason}, #state{refresh_pid=RefreshPid} = State
     % handled when spawn_reload_slots_map exits, either normally or not
     % cannot update slots here because we cannot assert reload_slots_map succeeded
     {noreply, exit_refresh_mapping(State, Reason)};
-handle_info({new_mapping, #state{slots = Slots, slots_maps = SlotsMaps, version = Version}}, State) ->
+handle_info({new_mapping, #state{slots = Slots, slots_maps = SlotsMaps}}, State) ->
     % handled if reload_slots_map succeeds, so we cannot reply callers
     % because we cannot assert spawn_reload_slots_map will exit normal
-    {noreply, State#state{slots = Slots, slots_maps = SlotsMaps, version = Version}};
+    {noreply, State#state{slots = Slots, slots_maps = SlotsMaps}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -267,7 +262,6 @@ initial_state(InitNodes) ->
         slots = undefined,
         slots_maps = {},
         init_nodes = [#node{address = A, port = P} || {A,P} <- InitNodes],
-        version = 0,
         refresh_pid = undefined,
         refresh_callers = []
     }.

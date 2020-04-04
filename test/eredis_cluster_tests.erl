@@ -170,7 +170,7 @@ basic_test_() ->
                 eredis_cluster:stop(),
                 eredis_cluster:start(),
                 ?assertMatch(
-                    {state, undefined, _, _, _, _, _},
+                    {state, undefined, _, _, _, _},
                     eredis_cluster_monitor:get_state()),
                 ?assertEqual({ok, <<"OK">>}, eredis_cluster:q(["SET", "test", "success"])),
 

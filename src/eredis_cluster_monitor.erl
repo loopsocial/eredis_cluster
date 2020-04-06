@@ -14,7 +14,6 @@
 -export([init/1]).
 -export([handle_call/3]).
 -export([handle_cast/2]).
--export([handle_continue/2]).
 -export([handle_info/2]).
 -export([terminate/2]).
 -export([code_change/3]).
@@ -38,12 +37,10 @@ connect(InitServers) ->
     gen_server:call(?MODULE, {connect, InitServers}).
 
 refresh_mapping() ->
-    gen_server:call(?MODULE, refresh_mapping, infinity),
-    ok.
+    gen_server:call(?MODULE, refresh_mapping, infinity).
 
 async_refresh_mapping() ->
-    gen_server:cast(?MODULE, refresh_mapping),
-    ok.
+    gen_server:cast(?MODULE, refresh_mapping).
 
 %% =============================================================================
 %% @doc Given a slot return the link (Redis instance) to the mapped
@@ -211,18 +208,14 @@ init(_Args) ->
     process_flag(trap_exit, true),
     ets:new(?MODULE, [public, set, named_table, {read_concurrency, true}]),
     InitNodes = application:get_env(eredis_cluster, init_nodes, []),
-    {ok, initial_state(InitNodes), {continue, connect}}.
-
-handle_continue(connect, State) ->
-    {noreply, spawn_reload_slots_map(State)}.
+    {ok, spawn_reload_slots_map(initial_state(InitNodes))}.
 
 handle_call({connect, InitNodes}, _From, _State) ->
     {reply, ok, spawn_reload_slots_map(initial_state(InitNodes))};
 
 handle_call(refresh_mapping, From, #state{refresh_callers = RefreshCallers} = State) ->
     NewState = State#state{refresh_callers = [From|RefreshCallers]},
-    % Note that we're not replying immediately. Instead, the response will be
-    % sent once the refresh mapping is done, from handle_info on new_mapping
+    % Caller is blocked, response is sent when linked process EXIT
     {noreply, spawn_reload_slots_map(NewState)};
 
 handle_call(get_refresh_callers, _From, State) ->
@@ -238,11 +231,11 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({'EXIT', RefreshPid, Reason}, #state{refresh_pid=RefreshPid} = State) ->
-    % handled when spawn_reload_slots_map exits, either normally or not
-    % cannot update slots here because we cannot assert reload_slots_map succeeded
+    % Handled when spawn_reload_slots_map exits, either normally or not
+    % Cannot update slots here because we cannot assert reload_slots_map succeeded
     {noreply, exit_refresh_mapping(State, Reason)};
 handle_info({new_mapping, #state{slots = Slots, slots_maps = SlotsMaps}}, State) ->
-    % handled if reload_slots_map succeeds, so we cannot reply callers
+    % Handled if reload_slots_map succeeds, so we cannot reply callers
     % because we cannot assert spawn_reload_slots_map will exit normal
     {noreply, State#state{slots = Slots, slots_maps = SlotsMaps}};
 

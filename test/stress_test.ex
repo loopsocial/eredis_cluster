@@ -2,14 +2,22 @@ defmodule StressTest do
   def infinity_loop() do
     counter = :counters.new(3, [:write_concurrency])
 
-    with {:ok, pid} <- Task.start(__MODULE__, :infinity_loop, [counter, 0]) do
+    with {:ok, pid} <- Task.start(__MODULE__, :loop, [counter, 0]) do
       %{counter: counter, pid: pid}
     end
   end
 
-  def infinity_loop(counter, iteration) do
+  def loop(counter, iteration, continue \\ true)
+
+  def loop(_counter, _iteration, false) do
+    IO.puts("Stopped!")
+  end
+
+  def loop(counter, iteration, true) do
     start_query_task(counter, iteration)
-    infinity_loop(counter, iteration + 1)
+    continue = has_error?(counter, iteration)
+
+    loop(counter, iteration + 1, continue)
   end
 
   def result(%{counter: counter}) do
@@ -28,8 +36,8 @@ defmodule StressTest do
     Process.exit(pid, :finish)
 
     IO.puts("\n>>> Final Result:")
-    print_pool_status()
     print_result(counter)
+    print_pool_status()
   end
 
   # Avg of 100 queries per run
@@ -63,7 +71,7 @@ defmodule StressTest do
   defp print_iteration(counter, iteration) do
     if should_print?(iteration) do
       IO.puts("\n-> Iteration: #{iteration}")
-      print_result(counter, :finish_on_errors)
+      print_result(counter)
       print_pool_status()
     end
   end
@@ -84,19 +92,17 @@ defmodule StressTest do
     end)
   end
 
-  defp print_result(counter, :finish_on_errors) do
-    counter_result = print_result(counter)
-
-    if counter_result[:error] > 0 do
-      IO.puts("Finishing...")
-      Process.exit(self(), :kill)
-    end
-  end
-
   defp print_result(counter) do
     IO.write("-> Query results: ")
-    counter_result = result(counter)
-    counter_result |> inspect() |> IO.puts()
-    counter_result
+    counter |> result() |> inspect() |> IO.puts()
+  end
+
+  # Every 100 iterations, return false if any error
+  defp has_error?(counter, iteration) do
+    if rem(iteration, 100) == 0 do
+      result(counter)[:error] == 0
+    else
+      true
+    end
   end
 end

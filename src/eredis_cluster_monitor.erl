@@ -90,11 +90,11 @@ get_pool_by_slot(Slot) ->
 %% Private
 -spec reload_slots_map(State::#state{}) -> NewState::#state{}.
 reload_slots_map(State) ->
-    [close_connection(SlotsMap)
-        || SlotsMap <- tuple_to_list(State#state.slots_maps)],
-
     ClusterSlots = get_cluster_slots(State#state.init_nodes),
     SlotsMaps = parse_cluster_slots(ClusterSlots),
+
+    [close_connection(SlotsMap)
+        || SlotsMap <- tuple_to_list(State#state.slots_maps)],
 
     ConnectedSlotsMaps = connect_all_slots(SlotsMaps),
     Slots = create_slots_cache(ConnectedSlotsMaps),

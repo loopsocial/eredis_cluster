@@ -1,24 +1,19 @@
-defmodule LoadTest do
-  @key "fooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
-  @value "baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaar"
-  @command ["SET", @key, @value]
-
-  def run(n \\ 1000) do
+defmodule StressTest do
+  def infinity_loop() do
     counter = :counters.new(3, [:write_concurrency])
 
-    counter
-    |> repeat(0, n)
-    |> print_result()
-
-    print_until_finish(counter)
+    with {:ok, pid} <- Task.start(__MODULE__, :infinity_loop, [counter, 0]) do
+      %{counter: counter, pid: pid}
+    end
   end
 
-  def repeat(counter, n, n), do: counter
+  def infinity_loop(counter, iteration) do
+    start_query_task(counter, iteration)
+    infinity_loop(counter, iteration + 1)
+  end
 
-  def repeat(counter, i, n) do
-    print_pool_status(i, n)
-    async_query(counter)
-    repeat(counter, i + 1, n)
+  def result(%{counter: counter}) do
+    result(counter)
   end
 
   def result(counter) do
@@ -29,21 +24,33 @@ defmodule LoadTest do
     ]
   end
 
-  @random_query_limit 1000
-  defp async_query(counter) do
+  def finish(%{counter: counter, pid: pid}) do
+    Process.exit(pid, :finish)
+
+    IO.puts("\n>>> Final Result:")
+    print_pool_status()
+    print_result(counter)
+  end
+
+  # Avg of 100 queries per run
+  @random_query_limit 200
+  defp start_query_task(counter, iteration) do
     number_of_queries = :rand.uniform(@random_query_limit)
 
-    Task.async(fn ->
-      Enum.each(1..number_of_queries, fn index ->
-        {result, _} = query(index)
+    Task.start_link(fn ->
+      for i <- 1..number_of_queries do
+        {result, _} = query(i)
         count(counter, result)
-      end)
+      end
     end)
 
     count(counter, :total, number_of_queries)
+
+    print_iteration(counter, iteration)
   end
 
-  defp query(_index), do: :eredis_cluster.q(@command)
+  @big_key "foooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+  defp query(index), do: :eredis_cluster.q(["GET", "#{@big_key}:#{index}"])
 
   defp count(counter, :ok), do: :counters.add(counter, 1, 1)
   defp count(counter, :error), do: :counters.add(counter, 2, 1)
@@ -52,22 +59,22 @@ defmodule LoadTest do
     :counters.add(counter, 3, number_of_queries)
   end
 
-  defp measure(function) do
-    function
-    |> :timer.tc()
-    |> elem(0)
-    |> Kernel./(1_000_000)
+  # Print functions
+  defp print_iteration(counter, iteration) do
+    if should_print?(iteration) do
+      IO.puts("\n-> Iteration: #{iteration}")
+      print_result(counter, :finish_on_errors)
+      print_pool_status()
+    end
   end
 
-  # 10 times print pool status
-  defp print_pool_status(i, n) when rem(i, div(n, 10)) == 0 do
-    IO.puts("-> Iteration: #{i}/#{n}")
-    print_pool_status()
-  end
-
-  defp print_pool_status(_i, _n), do: :ok
+  # Print every 1000 loops
+  @print_step 1000
+  defp should_print?(i), do: rem(i, @print_step) == 0
 
   def print_pool_status() do
+    IO.puts("-> Pool status")
+
     :eredis_cluster_monitor.get_all_pools()
     |> Enum.each(fn pool ->
       pool
@@ -77,20 +84,19 @@ defmodule LoadTest do
     end)
   end
 
-  defp print_until_finish(counter) do
-    [ok: ok, error: error, total: total] = result(counter)
+  defp print_result(counter, :finish_on_errors) do
+    counter_result = print_result(counter)
 
-    if ok + error == total do
-      :ok
-    else
-      if rem(ok + error, div(total, 10)) == 0 do
-        print_result(counter)
-        print_pool_status()
-      end
-
-      print_until_finish(counter)
+    if counter_result[:error] > 0 do
+      IO.puts("Finishing...")
+      Process.exit(self(), :kill)
     end
   end
 
-  defp print_result(counter), do: counter |> result() |> inspect() |> IO.puts()
+  defp print_result(counter) do
+    IO.write("-> Query results: ")
+    counter_result = result(counter)
+    counter_result |> inspect() |> IO.puts()
+    counter_result
+  end
 end

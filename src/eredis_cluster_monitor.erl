@@ -99,14 +99,15 @@ reload_slots_map(State) ->
     ConnectedSlotsMaps = connect_all_slots(SlotsMaps),
     Slots = create_slots_cache(ConnectedSlotsMaps),
 
-    NewState = State#state{
+    EtsState = State#state{
         slots = list_to_tuple(Slots),
-        slots_maps = list_to_tuple(ConnectedSlotsMaps)
+        slots_maps = list_to_tuple(ConnectedSlotsMaps),
+        refresh_callers = []
     },
 
-    true = ets:insert(?MODULE, [{cluster_state, NewState}]),
+    true = ets:insert(?MODULE, [{cluster_state, EtsState}]),
 
-    NewState.
+    EtsState.
 
 -spec get_cluster_slots([#node{}]) -> [[bitstring() | [bitstring()]]].
 get_cluster_slots([]) ->
@@ -219,7 +220,12 @@ handle_call(refresh_mapping, From, #state{refresh_callers = RefreshCallers} = St
     {noreply, spawn_reload_slots_map(NewState)};
 
 handle_call(get_refresh_callers, _From, State) ->
+    % for tests
     {reply, State#state.refresh_callers, State};
+
+handle_call(get_refresh_pid, _From, State) ->
+    % for tests
+    {reply, State#state.refresh_pid, State};
 
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
@@ -233,7 +239,7 @@ handle_cast(_Msg, State) ->
 handle_info({'EXIT', RefreshPid, Reason}, #state{refresh_pid=RefreshPid} = State) ->
     % Handled when spawn_reload_slots_map exits, either normally or not
     % Cannot update slots here because we cannot assert reload_slots_map succeeded
-    {noreply, exit_refresh_mapping(State, Reason)};
+    {noreply, reply_refresh_callers(State, Reason)};
 handle_info({new_mapping, #state{slots = Slots, slots_maps = SlotsMaps}}, State) ->
     % Handled if reload_slots_map succeeds, so we cannot reply callers
     % because we cannot assert spawn_reload_slots_map will exit normal
@@ -241,14 +247,6 @@ handle_info({new_mapping, #state{slots = Slots, slots_maps = SlotsMaps}}, State)
 
 handle_info(_Info, State) ->
     {noreply, State}.
-
-spawn_reload_slots_map(#state{refresh_pid = undefined} = State) ->
-    Me = self(),
-    NewMapping = fun () -> erlang:send(Me, {new_mapping, reload_slots_map(State)}) end,
-    RefreshPid = proc_lib:spawn_link(NewMapping),
-    State#state{refresh_pid = RefreshPid};
-spawn_reload_slots_map(#state{refresh_pid = _} = State) ->
-    State.
 
 initial_state(InitNodes) ->
     #state{
@@ -259,21 +257,23 @@ initial_state(InitNodes) ->
         refresh_callers = []
     }.
 
-exit_refresh_mapping(#state{refresh_callers = RefreshCallers} = State, Reason) ->
+spawn_reload_slots_map(#state{refresh_pid = undefined} = State) ->
+    Me = self(),
+    NewMapping = fun () -> Me ! {new_mapping, reload_slots_map(State)} end,
+    RefreshPid = proc_lib:spawn_link(NewMapping),
+    State#state{refresh_pid = RefreshPid};
+spawn_reload_slots_map(#state{refresh_pid = _} = State) ->
+    State.
+
+reply_refresh_callers(State, Reason) ->
     Response =
         case Reason == normal of
-            true -> ok;
-            false -> error
+            true -> {ok, State#state.refresh_pid};
+            false -> {error, Reason}
         end,
 
-    reply_refresh_callers(RefreshCallers, Response),
+    [gen_server:reply(From, Response) || From <- State#state.refresh_callers],
     State#state{refresh_pid = undefined, refresh_callers = []}.
-
-reply_refresh_callers([], Response) -> Response;
-reply_refresh_callers([Pid|PidList], Response) ->
-    {FromPid, FromTag} = Pid,
-    erlang:send(FromPid, {FromTag, Response}),
-    reply_refresh_callers(PidList, Response).
 
 terminate(_Reason, _State) ->
     ok.

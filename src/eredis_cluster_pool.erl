@@ -15,7 +15,7 @@
 -spec create(Host::string(), Port::integer()) ->
     {ok, PoolName::atom()} | {error, PoolName::atom()}.
 create(Host, Port) ->
-	PoolName = get_name(Host, Port),
+    PoolName = get_name(Host, Port),
 
     case whereis(PoolName) of
         undefined ->
@@ -27,18 +27,25 @@ create(Host, Port) ->
                           {password, Password}
                          ],
 
-        	Size = application:get_env(eredis_cluster, pool_size, 10),
-        	MaxOverflow = application:get_env(eredis_cluster, pool_max_overflow, 0),
+            Size = application:get_env(eredis_cluster, pool_size, 10),
+            % MaxOverflow = application:get_env(eredis_cluster, pool_max_overflow, 0),
 
-            PoolArgs = [{name, {local, PoolName}},
-                        {worker_module, eredis_cluster_pool_worker},
-                        {size, Size},
-                        {max_overflow, MaxOverflow}],
+            % PoolArgs = [{name, {local, PoolName}},
+            %             {worker_module, eredis_cluster_pool_worker},
+            %             {size, Size},
+            %             {max_overflow, MaxOverflow}],
 
-            ChildSpec = poolboy:child_spec(PoolName, PoolArgs, WorkerArgs),
+            % ChildSpec = poolboy:child_spec(PoolName, PoolArgs, WorkerArgs),
+            % {Result, _} = supervisor:start_child(?MODULE,ChildSpec),
 
-            {Result, _} = supervisor:start_child(?MODULE,ChildSpec),
-        	{Result, PoolName};
+            application:ensure_all_started(erlpool),
+            Args = [
+                {size, Size},
+                {start_mfa, {eredis_cluster_erlpool_worker, start_link, [WorkerArgs]}}
+            ],
+            Result = erlpool:start_pool(PoolName, Args),
+
+            {Result, PoolName};
         _ ->
             {ok, PoolName}
     end.
@@ -47,7 +54,9 @@ create(Host, Port) ->
     redis_result().
 transaction(PoolName, Transaction) ->
     try
-        poolboy:transaction(PoolName, Transaction)
+        % poolboy:transaction(PoolName, Transaction)
+        Pid = erlpool:pid(PoolName),
+        Transaction(Pid)
     catch
         exit:_Reason ->
             {error, no_connection}
@@ -55,8 +64,9 @@ transaction(PoolName, Transaction) ->
 
 -spec stop(PoolName::atom()) -> ok.
 stop(PoolName) ->
-    supervisor:terminate_child(?MODULE,PoolName),
-    supervisor:delete_child(?MODULE,PoolName),
+    erlpool:stop_pool(PoolName),
+    % supervisor:terminate_child(?MODULE,PoolName),
+    % supervisor:delete_child(?MODULE,PoolName),
     ok.
 
 -spec get_name(Host::string(), Port::integer()) -> PoolName::atom().

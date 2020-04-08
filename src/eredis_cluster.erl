@@ -377,7 +377,8 @@ qa(Command) ->
 %% =============================================================================
 -spec qw(Worker::pid(), redis_command()) -> redis_result().
 qw(Worker, Command) ->
-    eredis_cluster_pool_worker:query(Worker, Command).
+    eredis_cluster_erlpool_worker:query(Worker, Command).
+    % eredis_cluster_pool_worker:query(Worker, Command).
 
 %% =============================================================================
 %% @doc Perform flushdb command on each node of the redis cluster

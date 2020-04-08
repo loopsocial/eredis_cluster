@@ -217,14 +217,8 @@ handle_transaction_result(Result) ->
     case Result of
         % If instance down we wait refresh finish and retry
         {error, no_connection} ->
-            % erlang:display("no_connection"),
             eredis_cluster_monitor:refresh_mapping(),
             retry;
-
-        % If pool is empty, retry or refresh will make it worse
-        {error, pool_empty} ->
-            % erlang:display("pool_empty"),
-            {error, pool_empty};
 
         % If any other error we retry
         {error, Reason} ->

@@ -31,7 +31,7 @@
 -define(REDIS_CLUSTER_HASH_SLOTS, 16384).
 
 % Retries will take 5, 25 and 125 ms
--define(RETRY_LIMIT, 4).
+-define(RETRY_LIMIT, 5).
 -define(EXPONENTIAL_BACKOFF_BASE, 5).
 
 -define(CRCDEF, <<16#00,16#00,16#10,16#21,16#20,16#42,16#30,16#63,

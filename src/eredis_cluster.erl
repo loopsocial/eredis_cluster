@@ -90,7 +90,7 @@ transaction(Transaction, Slot, ExpectedValue, Counter) ->
 -spec qmn(redis_pipeline_command()) -> redis_pipeline_result().
 qmn(Commands) -> qmn(Commands, 0).
 
-qmn(_, ?RETRY_LIMIT) ->
+qmn(_, ?QUERY_LIMIT) ->
     {error, no_connection};
 qmn(Commands, Counter) ->
     exponential_backoff(Counter),
@@ -175,7 +175,7 @@ query(Command, PoolKey) ->
     Transaction = fun(Worker) -> qw(Worker, Command) end,
     query(Transaction, Slot, 0).
 
-query(_, _, ?RETRY_LIMIT) ->
+query(_, _, ?QUERY_LIMIT) ->
     {error, no_connection};
 query(Transaction, Slot, Counter) ->
     exponential_backoff(Counter),

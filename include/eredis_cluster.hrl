@@ -30,9 +30,9 @@
 -define(OL_TRANSACTION_TTL, 16).
 -define(REDIS_CLUSTER_HASH_SLOTS, 16384).
 
-% Retries will take 1, 10, 100, 1000, 10000 miliseconds
--define(RETRY_LIMIT, 5).
--define(EXPONENTIAL_BACKOFF_BASE, 10).
+% Retries will take 5, 25, 125, 625 miliseconds
+-define(QUERY_LIMIT, 5).
+-define(EXPONENTIAL_BACKOFF_BASE, 5).
 
 -define(CRCDEF, <<16#00,16#00,16#10,16#21,16#20,16#42,16#30,16#63,
 16#40,16#84,16#50,16#a5,16#60,16#c6,16#70,16#e7,

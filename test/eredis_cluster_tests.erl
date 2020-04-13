@@ -198,7 +198,6 @@ basic_test_() ->
             { "eredis_cluster_monitor:refresh_mapping/0",
             fun() ->
                 eredis_cluster_monitor:refresh_mapping(),
-                % TODO move test slot check new state
                 ?assertEqual({ok, <<"OK">>}, eredis_cluster:q(["SET", "test", "refresh"])),
                 ?assertEqual({ok, <<"refresh">>}, eredis_cluster:q(["GET", "test"]))
             end

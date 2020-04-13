@@ -1,23 +1,40 @@
 defmodule StressTest do
-  def infinity_loop() do
-    counter = :counters.new(3, [:write_concurrency])
+  @moduledoc """
+  Fires X concurrent queries per Y milliseconds.
 
-    with {:ok, pid} <- Task.start(__MODULE__, :loop, [counter, 0]) do
-      %{counter: counter, pid: pid}
-    end
+  Start test
+  iex> test = StressTest.start()
+
+  iex> StressTest.result(test)
+  [ok: 5600, error: 0, total: 5600, rate: 1.0]
+
+  iex> StressTest.finish(test)
+  """
+  @keys ["foo1", "foo2", "foo3", "foo4"]
+  @concurrent_queries_per_loop 100
+  @milliseconds_per_loop 100
+
+  def start() do
+    for key <- @keys, do: :eredis_cluster.q(["SET", key, 0])
+    counter = :counters.new(1, [:write_concurrency])
+    {:ok, loop_pid} = Task.start(fn -> loop(counter) end)
+
+    %{counter: counter, pid: loop_pid}
   end
 
-  def loop(counter, iteration, continue \\ true)
+  defp loop(counter) do
+    Task.start(fn ->
+      for _ <- 1..@concurrent_queries_per_loop, do: Task.start_link(&increase_keys/0)
+      :counters.add(counter, 1, @concurrent_queries_per_loop)
+    end)
 
-  def loop(_counter, _iteration, false) do
-    IO.puts("Stopped!")
+    :timer.sleep(@milliseconds_per_loop)
+    loop(counter)
   end
 
-  def loop(counter, iteration, true) do
-    start_query_task(counter, iteration)
-    continue = has_error?(counter, iteration)
-
-    loop(counter, iteration + 1, continue)
+  def finish(%{counter: counter, pid: pid}) do
+    Process.exit(pid, :kill)
+    result(counter)
   end
 
   def result(%{counter: counter}) do
@@ -25,84 +42,27 @@ defmodule StressTest do
   end
 
   def result(counter) do
+    ok_count = get_min_key()
+    total_count = :counters.get(counter, 1)
+
     [
-      ok: :counters.get(counter, 1),
-      error: :counters.get(counter, 2),
-      total: :counters.get(counter, 3)
+      ok: ok_count,
+      error: total_count - ok_count,
+      total: total_count,
+      rate: ok_count / total_count
     ]
   end
 
-  def finish(%{counter: counter, pid: pid}) do
-    Process.exit(pid, :finish)
-
-    IO.puts("\n>>> Final Result:")
-    print_result(counter)
-    print_pool_status()
+  defp increase_keys() do
+    for key <- @keys, do: :eredis_cluster.q(["INCR", "#{key}"])
   end
 
-  # Avg of 100 queries per run
-  @random_query_limit 200
-  defp start_query_task(counter, iteration) do
-    number_of_queries = :rand.uniform(@random_query_limit)
-
-    Task.start_link(fn ->
-      for i <- 1..number_of_queries do
-        {result, _} = query(i)
-        count(counter, result)
-      end
+  defp get_min_key() do
+    @keys
+    |> Enum.map(fn key ->
+      {:ok, result} = :eredis_cluster.q(["GET", key])
+      String.to_integer(result)
     end)
-
-    count(counter, :total, number_of_queries)
-
-    print_iteration(counter, iteration)
-  end
-
-  @big_key "foooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
-  defp query(index), do: :eredis_cluster.q(["GET", "#{@big_key}:#{index}"])
-
-  defp count(counter, :ok), do: :counters.add(counter, 1, 1)
-  defp count(counter, :error), do: :counters.add(counter, 2, 1)
-
-  defp count(counter, :total, number_of_queries) do
-    :counters.add(counter, 3, number_of_queries)
-  end
-
-  # Print functions
-  defp print_iteration(counter, iteration) do
-    if should_print?(iteration) do
-      IO.puts("\n-> Iteration: #{iteration}")
-      print_result(counter)
-      print_pool_status()
-    end
-  end
-
-  # Print every 1000 loops
-  @print_step 1000
-  defp should_print?(i), do: rem(i, @print_step) == 0
-
-  def print_pool_status() do
-    IO.puts("-> Pool status")
-
-    :eredis_cluster_monitor.get_all_pools()
-    |> Enum.each(fn pool ->
-      pool
-      |> :poolboy.status()
-      |> inspect()
-      |> IO.puts()
-    end)
-  end
-
-  defp print_result(counter) do
-    IO.write("-> Query results: ")
-    counter |> result() |> inspect() |> IO.puts()
-  end
-
-  # Every 100 iterations, return false if any error
-  defp has_error?(counter, iteration) do
-    if rem(iteration, 100) == 0 do
-      result(counter)[:error] == 0
-    else
-      true
-    end
+    |> Enum.min()
   end
 end

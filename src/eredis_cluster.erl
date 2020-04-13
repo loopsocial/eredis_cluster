@@ -197,7 +197,6 @@ try_query(Pool, Transaction) ->
         % configuration as soon as possible is often the best strategy
         % https://redis.io/topics/cluster-spec
         {error, <<"MOVED ", SlotAddressPort/binary>>} ->
-            erlang:display("MOVED"),
             eredis_cluster_monitor:async_refresh_mapping(),
             try_redirect(SlotAddressPort, Transaction);
 
@@ -206,7 +205,6 @@ try_query(Pool, Transaction) ->
         % smart clients should not update internal state
         % https://redis.io/presentation/Redis_Cluster.pdf
         {error, <<"ASK ", SlotAddressPort/binary>>} ->
-            erlang:display("ASK"),
             try_redirect(SlotAddressPort, Transaction);
 
         Payload ->

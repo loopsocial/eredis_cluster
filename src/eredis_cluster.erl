@@ -254,7 +254,9 @@ try_redirect(SlotAddressPort, Transaction) ->
 
 get_address_port(SlotAddressPort) ->
     [_Slot, AddressPort | _] = string:split(binary_to_list(SlotAddressPort), " "),
-    string:split(AddressPort, ":").
+    [Address, Port] = string:split(AddressPort, ":"),
+    [Address, list_to_integer(Port)].
+
 
 exponential_backoff(0) -> ok;
 exponential_backoff(Counter) ->

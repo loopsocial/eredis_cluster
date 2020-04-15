@@ -198,14 +198,14 @@ try_query(Pool, Transaction) ->
         % https://redis.io/topics/cluster-spec
         {error, <<"MOVED ", SlotAddressPort/binary>>} ->
             eredis_cluster_monitor:async_refresh_mapping(),
-            try_redirect(SlotAddressPort, Transaction);
+            try_redirect(SlotAddressPort, Transaction, moved);
 
         % ASK is like MOVED but the difference is that the client should retry
-        % against on new instance only this query, not next queries. That means:
-        % smart clients should not update internal state
-        % https://redis.io/presentation/Redis_Cluster.pdf
+        % against on new instance only this query, not next queries.
+        % When migration is finished, MOVED will be received and only then
+        % we should refresh mapping.
         {error, <<"ASK ", SlotAddressPort/binary>>} ->
-            try_redirect(SlotAddressPort, Transaction);
+            try_redirect(SlotAddressPort, Transaction, ask);
 
         Payload ->
             Payload
@@ -243,10 +243,10 @@ handle_transaction_result(Result, check_pipeline_result) ->
        Payload -> Payload
     end.
 
-try_redirect(SlotAddressPort, Transaction) ->
+try_redirect(SlotAddressPort, Transaction, RedirectionType) ->
     [Address, Port] = get_address_port(SlotAddressPort),
     case eredis_cluster_pool:create(Address, Port) of
-        {ok, Pool} -> eredis_cluster_pool:transaction(Pool, Transaction);
+        {ok, Pool} -> redirect_transaction(Pool, Transaction, RedirectionType);
         _ -> retry
     end.
 
@@ -254,6 +254,14 @@ get_address_port(SlotAddressPort) ->
     [_Slot, AddressPort | _] = string:split(binary_to_list(SlotAddressPort), " "),
     [Address, Port] = string:split(AddressPort, ":"),
     [Address, list_to_integer(Port)].
+
+redirect_transaction(Pool, Transaction, moved) ->
+    eredis_cluster_pool:transaction(Pool, Transaction);
+redirect_transaction(Pool, Transaction, ask) ->
+    % ASK redirection: https://redis.io/topics/cluster-spec
+    Asking = fun(Worker) -> qw(Worker, ["ASKING"]) end,
+    eredis_cluster_pool:transaction(Pool, Asking),
+    eredis_cluster_pool:transaction(Pool, Transaction).
 
 
 exponential_backoff(0) -> ok;

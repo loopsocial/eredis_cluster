@@ -2,67 +2,123 @@ defmodule StressTest do
   @moduledoc """
   Fires X concurrent queries per Y milliseconds.
 
-  Start test
+  Setup mix.exs with eredis_cluster configuration:
+  ```
+    def application do
+      [
+        ...
+        env: [{:init_nodes, [{'127.0.0.1', 30001}]}]
+      ]
+    end
+  ```
+
+  Start the cluster and run with `iex -S mix`:
+
+  iex> c("test/stress_test.ex")
   iex> test = StressTest.start()
-
   iex> StressTest.result(test)
-  [ok: 5600, error: 0, total: 5600, rate: 1.0]
-
   iex> StressTest.finish(test)
   """
-  @keys ["foo1", "foo2", "foo3", "foo4"]
-  @concurrent_queries_per_loop 100
-  @milliseconds_per_loop 100
 
-  def start() do
-    for key <- @keys, do: :eredis_cluster.q(["SET", key, 0])
-    counter = :counters.new(1, [:write_concurrency])
-    {:ok, loop_pid} = Task.start(fn -> loop(counter) end)
+  @keys ["foo1", "foo2", "foo3", "foo4", "foo5"]
+  @concurrency 100
+  @interval 100
+  @counter_index %{total: 1, ok: 2}
 
-    %{counter: counter, pid: loop_pid}
+  @doc """
+  Runs test for a time in milliseconds.
+
+  Example: run for 5 seconds
+  iex> test = StressTest.run_for(5000)
+  """
+  def run_for(time_ms, opts \\ []) do
+    test = StressTest.start(opts)
+    Process.sleep(time_ms)
+    StressTest.finish(test)
   end
 
-  defp loop(counter) do
-    Task.start(fn ->
-      for _ <- 1..@concurrent_queries_per_loop, do: Task.start_link(&increase_keys/0)
-      :counters.add(counter, 1, @concurrent_queries_per_loop)
+  @doc """
+  Start concurrent processes that run a query per interval in milliseconds.
+
+  iex> test = StressTest.start()
+  """
+  def start(opts \\ []) do
+    opts = Enum.into(opts, %{concurrency: @concurrency, interval: @interval})
+    counter = initialize_count()
+
+    tasks =
+      Stream.repeatedly(fn -> loop(opts.interval, counter) end)
+      |> Enum.take(opts.concurrency)
+
+    %{counter: counter, tasks: tasks}
+  end
+
+  # Sleeps between 1 and interval randomly, queries,
+  # waits the full interval and repeat forever.
+  defp loop(interval, counter) do
+    step_size = length(@keys)
+
+    Task.async(fn ->
+      fn ->
+        Task.start(fn ->
+          interval
+          |> :rand.uniform()
+          |> Process.sleep()
+
+          query(counter)
+        end)
+
+        :counters.add(counter, @counter_index[:total], step_size)
+        Process.sleep(interval)
+      end
+      |> Stream.repeatedly()
+      |> Stream.run()
     end)
-
-    :timer.sleep(@milliseconds_per_loop)
-    loop(counter)
   end
 
-  def finish(%{counter: counter, pid: pid}) do
-    Process.exit(pid, :kill)
-    result(counter)
+  @doc """
+  Finish concurrent loops
+
+  iex> StressTest.start(test)
+  """
+  def finish(state) do
+    Enum.each(state.tasks, &Task.shutdown/1)
+    state
   end
 
+  @doc """
+  Returns successful, pending and total number of queries ran
+  since test started.
+
+  iex> StressTest.result(test)
+  """
   def result(%{counter: counter}) do
-    result(counter)
-  end
-
-  def result(counter) do
-    ok_count = get_min_key()
-    total_count = :counters.get(counter, 1)
+    total = :counters.get(counter, @counter_index[:total])
+    ok = :counters.get(counter, @counter_index[:ok])
 
     [
-      ok: ok_count,
-      error: total_count - ok_count,
-      total: total_count,
-      rate: ok_count / total_count
+      ok: ok,
+      pending: total - ok,
+      total: total
     ]
   end
 
-  defp increase_keys() do
-    for key <- @keys, do: :eredis_cluster.q(["INCR", "#{key}"])
+  defp initialize_count() do
+    Enum.each(@keys, fn key -> :eredis_cluster.q(["SET", key, 0]) end)
+    :counters.new(map_size(@counter_index), [:write_concurrency])
   end
 
-  defp get_min_key() do
-    @keys
-    |> Enum.map(fn key ->
-      {:ok, result} = :eredis_cluster.q(["GET", key])
-      String.to_integer(result)
-    end)
-    |> Enum.min()
+  defp query(counter) do
+    increment = fn key -> :eredis_cluster.q(["INCR", key]) end
+
+    ok_sum =
+      Enum.reduce(@keys, 0, fn key, sum ->
+        case increment.(key) do
+          {:ok, _} -> sum + 1
+          {:error, _} -> sum
+        end
+      end)
+
+    :counters.add(counter, @counter_index[:ok], ok_sum)
   end
 end

@@ -19,6 +19,7 @@
 -export([update_hash_field/3]).
 -export([optimistic_locking_transaction/3]).
 -export([eval/4]).
+-export([log_error/1]).
 
 -include("eredis_cluster.hrl").
 
@@ -89,28 +90,27 @@ transaction(Transaction, Slot, ExpectedValue, Counter) ->
 -spec qmn(redis_pipeline_command()) -> redis_pipeline_result().
 qmn(Commands) -> qmn(Commands, 0).
 
-qmn(_, ?REDIS_CLUSTER_REQUEST_TTL) -> 
+qmn(_, ?QUERY_LIMIT) ->
     {error, no_connection};
 qmn(Commands, Counter) ->
-    %% Throttle retries
-    throttle_retries(Counter),
+    exponential_backoff(Counter),
+    {CommandsByPools, MappingInfo} = split_by_pools(Commands),
 
-    {CommandsByPools, MappingInfo, Version} = split_by_pools(Commands),
-    case qmn2(CommandsByPools, MappingInfo, [], Version) of
+    case qmn2(CommandsByPools, MappingInfo, []) of
         retry -> qmn(Commands, Counter + 1);
         Res -> Res
     end.
 
-qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc, Version) ->
+qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc) ->
     Transaction = fun(Worker) -> qw(Worker, PoolCommands) end,
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
-    case handle_transaction_result(Result, Version, check_pipeline_result) of
+    case handle_transaction_result(Result, check_pipeline_result) of
         retry -> retry;
         Res -> 
             MappedRes = lists:zip(Mapping,Res),
-            qmn2(T1, T2, MappedRes ++ Acc, Version)
+            qmn2(T1, T2, MappedRes ++ Acc)
     end;
-qmn2([], [], Acc, _) ->
+qmn2([], [], Acc) ->
     SortedAcc =
         lists:sort(
             fun({Index1, _},{Index2, _}) ->
@@ -125,7 +125,7 @@ split_by_pools(Commands) ->
 split_by_pools([Command | T], Index, CmdAcc, MapAcc, State) ->
     Key = get_key_from_command(Command),
     Slot = get_key_slot(Key),
-    {Pool, _Version} = eredis_cluster_monitor:get_pool_by_slot(Slot, State),
+    Pool = eredis_cluster_monitor:get_pool_by_slot(Slot, State),
     {NewAcc1, NewAcc2} =
         case lists:keyfind(Pool, 1, CmdAcc) of
             false ->
@@ -139,10 +139,10 @@ split_by_pools([Command | T], Index, CmdAcc, MapAcc, State) ->
                 {[{Pool, CmdList2} | CmdAcc2], [{Pool, MapList2} | MapAcc2]}
         end,
     split_by_pools(T, Index+1, NewAcc1, NewAcc2, State);
-split_by_pools([], _Index, CmdAcc, MapAcc, State) ->
+split_by_pools([], _Index, CmdAcc, MapAcc, _State) ->
     CmdAcc2 = [{Pool, lists:reverse(Commands)} || {Pool, Commands} <- CmdAcc],
     MapAcc2 = [{Pool, lists:reverse(Mapping)} || {Pool, Mapping} <- MapAcc],
-    {CmdAcc2, MapAcc2, eredis_cluster_monitor:get_state_version(State)}.
+    {CmdAcc2, MapAcc2}.
 
 %% =============================================================================
 %% @doc Wrapper function for command using pipelined commands
@@ -175,63 +175,99 @@ query(Command, PoolKey) ->
     Transaction = fun(Worker) -> qw(Worker, Command) end,
     query(Transaction, Slot, 0).
 
-query(_, _, ?REDIS_CLUSTER_REQUEST_TTL) ->
+query(_, _, ?QUERY_LIMIT) ->
     {error, no_connection};
 query(Transaction, Slot, Counter) ->
-    %% Throttle retries
-    throttle_retries(Counter),
+    exponential_backoff(Counter),
 
-    {Pool, Version} = eredis_cluster_monitor:get_pool_by_slot(Slot),
+    Pool = eredis_cluster_monitor:get_pool_by_slot(Slot),
+    Result = try_query(Pool, Transaction),
 
-    Result = eredis_cluster_pool:transaction(Pool, Transaction),
-    case handle_transaction_result(Result, Version) of 
+    case handle_transaction_result(Result) of
         retry -> query(Transaction, Slot, Counter + 1);
-        Result -> Result
+        Payload -> Payload
     end.
 
-handle_transaction_result(Result, Version) ->
-    case Result of 
-       % If we detect a node went down, we should probably refresh the slot
-        % mapping.
-        {error, no_connection} ->
-            eredis_cluster_monitor:refresh_mapping(Version),
-            retry;
+try_query(Pool, Transaction) ->
+    Result = eredis_cluster_pool:transaction(Pool, Transaction),
 
-        % If the tcp connection is closed (connection timeout), the redis worker
-        % will try to reconnect, thus the connection should be recovered for
-        % the next request. We don't need to refresh the slot mapping in this
-        % case
-        {error, tcp_closed} ->
-            retry;
+    case Result of
+        % When a redirection is encountered, it is likely multiple slots
+        % were reconfigured rather than just one, so updating the client
+        % configuration as soon as possible is often the best strategy
+        % https://redis.io/topics/cluster-spec
+        {error, <<"MOVED ", SlotAddressPort/binary>>} ->
+            eredis_cluster_monitor:async_refresh_mapping(),
+            try_redirect(SlotAddressPort, Transaction, moved);
 
-        % Redis explicitly say our slot mapping is incorrect, we need to refresh
-        % it
-        {error, <<"MOVED ", _/binary>>} ->
-            eredis_cluster_monitor:refresh_mapping(Version),
-            retry;
+        % ASK is like MOVED but the difference is that the client should retry
+        % against on new instance only this query, not next queries.
+        % When migration is finished, MOVED will be received and only then
+        % we should refresh mapping.
+        {error, <<"ASK ", SlotAddressPort/binary>>} ->
+            try_redirect(SlotAddressPort, Transaction, ask);
 
         Payload ->
             Payload
     end.
-handle_transaction_result(Result, Version, check_pipeline_result) ->
-    case handle_transaction_result(Result, Version) of
+
+handle_transaction_result(Result) ->
+    case Result of
+        % If instance down we wait refresh finish and retry
+        {error, no_connection} ->
+            eredis_cluster_monitor:refresh_mapping(),
+            retry;
+
+        % If any other error we retry
+        {error, Reason} ->
+            log_error(["Redis Cluster Error: ~p", [Reason]]),
+            retry;
+
+        % Successful transactions and pool_empty error just return
+        Payload -> Payload
+    end.
+handle_transaction_result(Result, check_pipeline_result) ->
+    case handle_transaction_result(Result) of
        retry -> retry;
        Payload when is_list(Payload) ->
            Pred = fun({error, <<"MOVED ", _/binary>>}) -> true;
-                    (_) -> false
-                 end,
+                     (_) -> false
+                  end,
            case lists:any(Pred, Payload) of
-               false -> Payload;
                true ->
-                   eredis_cluster_monitor:refresh_mapping(Version),
-                   retry
+                   eredis_cluster_monitor:refresh_mapping(),
+                   retry;
+               false ->
+                   Payload
            end;
        Payload -> Payload
     end.
 
--spec throttle_retries(integer()) -> ok.
-throttle_retries(0) -> ok;
-throttle_retries(_) -> timer:sleep(?REDIS_RETRY_DELAY).
+try_redirect(SlotAddressPort, Transaction, RedirectionType) ->
+    [Address, Port] = get_address_port(SlotAddressPort),
+    case eredis_cluster_pool:create(Address, Port) of
+        {ok, Pool} -> redirect_transaction(Pool, Transaction, RedirectionType);
+        _ -> retry
+    end.
+
+get_address_port(SlotAddressPort) ->
+    [_Slot, AddressPort | _] = string:split(binary_to_list(SlotAddressPort), " "),
+    [Address, Port] = string:split(AddressPort, ":"),
+    [Address, list_to_integer(Port)].
+
+redirect_transaction(Pool, Transaction, moved) ->
+    eredis_cluster_pool:transaction(Pool, Transaction);
+redirect_transaction(Pool, Transaction, ask) ->
+    % ASK redirection: https://redis.io/topics/cluster-spec
+    Asking = fun(Worker) -> qw(Worker, ["ASKING"]) end,
+    eredis_cluster_pool:transaction(Pool, Asking),
+    eredis_cluster_pool:transaction(Pool, Transaction).
+
+
+exponential_backoff(0) -> ok;
+exponential_backoff(Counter) ->
+    Time = trunc(math:pow(?EXPONENTIAL_BACKOFF_BASE, Counter)),
+    timer:sleep(Time).
 
 %% =============================================================================
 %% @doc Update the value of a key by applying the function passed in the
@@ -454,3 +490,10 @@ get_key_from_rest([_,KeyName|_]) when is_list(KeyName) ->
     KeyName;
 get_key_from_rest(_) ->
     undefined.
+
+-spec log_error([term()]) -> ok.
+log_error(Attrs) ->
+    case application:get_env(eredis_cluster, logger, true) of
+        true -> erlang:apply(logger, error, Attrs);
+        false -> ok
+    end.

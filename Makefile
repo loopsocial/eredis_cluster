@@ -97,7 +97,7 @@ clean:
 eunit:
 	@rm -rf .eunit
 	@mkdir -p .eunit
-	@ERL_FLAGS="-config test.config" $(REBAR) eunit
+	@ERL_FLAGS="-config test.config -kernel logger_level critical" $(REBAR) eunit
 
 test: eunit
 

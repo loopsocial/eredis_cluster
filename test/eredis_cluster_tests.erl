@@ -163,8 +163,63 @@ basic_test_() ->
                 eredis_cluster:eval(Script, ScriptHash, ["qrs"], ["evaltest"]),
                 ?assertEqual({ok, <<"evaltest">>}, eredis_cluster:q(["get", "qrs"]))
             end
-            }
+            },
 
-      ]
+            { "start eredis_cluster_monitor asynchronously",
+            fun() ->
+                eredis_cluster:stop(),
+                eredis_cluster:start(),
+                ?assertMatch(
+                    {state, undefined, _, _, _, _},
+                    eredis_cluster_monitor:get_state()),
+                ?assertEqual({ok, <<"OK">>}, eredis_cluster:q(["SET", "test", "success"])),
+
+                eredis_cluster:stop(),
+                eredis_cluster:start(),
+                ?assertEqual({ok, <<"success">>}, eredis_cluster:q(["GET", "test"]))
+            end
+            },
+
+            { "fault tolerance",
+            fun() ->
+                exit(whereis(eredis_cluster_monitor), kill),
+                timer:sleep(10),
+                ?assertEqual({ok, <<"OK">>}, eredis_cluster:q(["SET", "test", "success"])),
+
+                eredis_cluster:stop(),
+                eredis_cluster:start(),
+
+                exit(whereis(eredis_cluster_pool), kill),
+                timer:sleep(10),
+                ?assertEqual({ok, <<"success">>}, eredis_cluster:q(["GET", "test"]))
+            end
+            },
+
+            { "eredis_cluster_monitor:refresh_mapping/0",
+            fun() ->
+                eredis_cluster_monitor:refresh_mapping(),
+                ?assertEqual({ok, <<"OK">>}, eredis_cluster:q(["SET", "test", "refresh"])),
+                ?assertEqual({ok, <<"refresh">>}, eredis_cluster:q(["GET", "test"]))
+            end
+            },
+            { "eredis_cluster_monitor:refresh_mapping/0 respond callers with same process",
+            fun() ->
+                NewMapping = fun() -> eredis_cluster_monitor:refresh_mapping() end,
+
+                Caller1 = proc_lib:spawn_link(NewMapping),
+                timer:sleep(1),
+                Pid1 = gen_server:call(eredis_cluster_monitor, get_refresh_pid),
+
+                Caller2 = proc_lib:spawn_link(NewMapping),
+                timer:sleep(1),
+                Pid2 = gen_server:call(eredis_cluster_monitor, get_refresh_pid),
+
+                Callers = gen_server:call(eredis_cluster_monitor, get_refresh_callers),
+                ?assertMatch([{Caller2, _}, {Caller1, _}], Callers),
+
+                ?assertEqual(Pid1, Pid2)
+            end
+            }
+        ]
     }
 }.

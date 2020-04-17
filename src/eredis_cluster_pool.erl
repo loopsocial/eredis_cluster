@@ -49,7 +49,7 @@ transaction(PoolName, Transaction) ->
     try
         poolboy:transaction(PoolName, Transaction)
     catch
-        exit:_ ->
+        exit:_Reason ->
             {error, no_connection}
     end.
 
@@ -65,9 +65,9 @@ get_name(Host, Port) ->
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
-	supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
--spec init([])
-	-> {ok, {{supervisor:strategy(), 1, 5}, [supervisor:child_spec()]}}.
+-spec init([]) ->
+    {ok, {{supervisor:strategy(), 1, 5}, [supervisor:child_spec()]}}.
 init([]) ->
-	{ok, {{one_for_one, 1, 5}, []}}.
+    {ok, {{one_for_one, 1, 5}, []}}.

@@ -4,8 +4,9 @@
 %% API.
 -export([start_link/0]).
 -export([connect/1]).
--export([refresh_mapping/1]).
--export([get_state/0, get_state_version/1]).
+-export([refresh_mapping/0]).
+-export([async_refresh_mapping/0]).
+-export([get_state/0]).
 -export([get_pool_by_slot/1, get_pool_by_slot/2]).
 -export([get_all_pools/0]).
 
@@ -23,7 +24,8 @@
     init_nodes :: [#node{}],
     slots :: tuple(), %% whose elements are integer indexes into slots_maps
     slots_maps :: tuple(), %% whose elements are #slots_map{}
-    version :: integer()
+    refresh_pid :: pid(),
+    refresh_callers :: [{pid(),term()}]
 }).
 
 %% API.
@@ -32,10 +34,13 @@ start_link() ->
     gen_server:start_link({local,?MODULE}, ?MODULE, [], []).
 
 connect(InitServers) ->
-    gen_server:call(?MODULE,{connect,InitServers}).
+    gen_server:call(?MODULE, {connect, InitServers}).
 
-refresh_mapping(Version) ->
-    gen_server:call(?MODULE,{reload_slots_map,Version}).
+refresh_mapping() ->
+    gen_server:call(?MODULE, refresh_mapping, infinity).
+
+async_refresh_mapping() ->
+    gen_server:cast(?MODULE, refresh_mapping).
 
 %% =============================================================================
 %% @doc Given a slot return the link (Redis instance) to the mapped
@@ -45,11 +50,10 @@ refresh_mapping(Version) ->
 
 -spec get_state() -> #state{}.
 get_state() ->
-    [{cluster_state, State}] = ets:lookup(?MODULE, cluster_state),
-    State.
-
-get_state_version(State) ->
-    State#state.version.
+    case ets:lookup(?MODULE, cluster_state) of
+      [{cluster_state, State}] -> State;
+      [] -> #state{}
+    end.
 
 -spec get_all_pools() -> [pid()].
 get_all_pools() ->
@@ -64,43 +68,46 @@ get_all_pools() ->
 %% @end
 %% =============================================================================
 -spec get_pool_by_slot(Slot::integer(), State::#state{}) ->
-    {PoolName::atom() | undefined, Version::integer()}.
-get_pool_by_slot(Slot, State) -> 
+    PoolName::atom() | undefined.
+get_pool_by_slot(_Slot, #state{slots = undefined}) ->
+    undefined;
+get_pool_by_slot(Slot, State) ->
     Index = element(Slot+1,State#state.slots),
     Cluster = element(Index,State#state.slots_maps),
     if
         Cluster#slots_map.node =/= undefined ->
-            {Cluster#slots_map.node#node.pool, State#state.version};
+            Cluster#slots_map.node#node.pool;
         true ->
-            {undefined, State#state.version}
+            undefined
     end.
 
 -spec get_pool_by_slot(Slot::integer()) ->
-    {PoolName::atom() | undefined, Version::integer()}.
+    PoolName::atom() | undefined.
 get_pool_by_slot(Slot) ->
     State = get_state(),
     get_pool_by_slot(Slot, State).
 
+%% Private
 -spec reload_slots_map(State::#state{}) -> NewState::#state{}.
 reload_slots_map(State) ->
+    ClusterSlots = get_cluster_slots(State#state.init_nodes),
+    SlotsMaps = parse_cluster_slots(ClusterSlots),
+
     [close_connection(SlotsMap)
         || SlotsMap <- tuple_to_list(State#state.slots_maps)],
 
-    ClusterSlots = get_cluster_slots(State#state.init_nodes),
-
-    SlotsMaps = parse_cluster_slots(ClusterSlots),
     ConnectedSlotsMaps = connect_all_slots(SlotsMaps),
     Slots = create_slots_cache(ConnectedSlotsMaps),
 
-    NewState = State#state{
+    EtsState = State#state{
         slots = list_to_tuple(Slots),
         slots_maps = list_to_tuple(ConnectedSlotsMaps),
-        version = State#state.version + 1
+        refresh_callers = []
     },
 
-    true = ets:insert(?MODULE, [{cluster_state, NewState}]),
+    true = ets:insert(?MODULE, [{cluster_state, EtsState}]),
 
-    NewState.
+    EtsState.
 
 -spec get_cluster_slots([#node{}]) -> [[bitstring() | [bitstring()]]].
 get_cluster_slots([]) ->
@@ -177,11 +184,9 @@ connect_node(Node) ->
     end.
 
 safe_eredis_start_link(Address,Port) ->
-    process_flag(trap_exit, true),
     DataBase = application:get_env(eredis_cluster, database, 0),
     Password = application:get_env(eredis_cluster, password, ""),
     Payload = eredis:start_link(Address, Port, DataBase, Password),
-    process_flag(trap_exit, false),
     Payload.
 
 -spec create_slots_cache([#slots_map{}]) -> [integer()].
@@ -199,40 +204,76 @@ connect_all_slots(SlotsMapList) ->
     [SlotsMap#slots_map{node=connect_node(SlotsMap#slots_map.node)}
         || SlotsMap <- SlotsMapList].
 
--spec connect_([{Address::string(), Port::integer()}]) -> #state{}.
-connect_([]) ->
-    #state{};
-connect_(InitNodes) ->
-    State = #state{
-        slots = undefined,
-        slots_maps = {},
-        init_nodes = [#node{address = A, port = P} || {A,P} <- InitNodes],
-        version = 0
-    },
-
-    reload_slots_map(State).
-
 %% gen_server.
-
 init(_Args) ->
-    ets:new(?MODULE, [protected, set, named_table, {read_concurrency, true}]),
+    process_flag(trap_exit, true),
+    ets:new(?MODULE, [public, set, named_table, {read_concurrency, true}]),
     InitNodes = application:get_env(eredis_cluster, init_nodes, []),
-    {ok, connect_(InitNodes)}.
+    {ok, spawn_reload_slots_map(initial_state(InitNodes))}.
 
-handle_call({reload_slots_map,Version}, _From, #state{version=Version} = State) ->
-    {reply, ok, reload_slots_map(State)};
-handle_call({reload_slots_map,_}, _From, State) ->
-    {reply, ok, State};
-handle_call({connect, InitServers}, _From, _State) ->
-    {reply, ok, connect_(InitServers)};
+handle_call({connect, InitNodes}, _From, _State) ->
+    {reply, ok, spawn_reload_slots_map(initial_state(InitNodes))};
+
+handle_call(refresh_mapping, From, #state{refresh_callers = RefreshCallers} = State) ->
+    NewState = State#state{refresh_callers = [From|RefreshCallers]},
+    % Caller is blocked, response is sent when linked process EXIT
+    {noreply, spawn_reload_slots_map(NewState)};
+
+handle_call(get_refresh_callers, _From, State) ->
+    % for tests
+    {reply, State#state.refresh_callers, State};
+
+handle_call(get_refresh_pid, _From, State) ->
+    % for tests
+    {reply, State#state.refresh_pid, State};
+
 handle_call(_Request, _From, State) ->
     {reply, ignored, State}.
+
+handle_cast(refresh_mapping, State) ->
+    {noreply, spawn_reload_slots_map(State)};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+handle_info({'EXIT', RefreshPid, Reason}, #state{refresh_pid=RefreshPid} = State) ->
+    % Handled when spawn_reload_slots_map exits, either normally or not
+    % Cannot update slots here because we cannot assert reload_slots_map succeeded
+    {noreply, reply_refresh_callers(State, Reason)};
+handle_info({new_mapping, #state{slots = Slots, slots_maps = SlotsMaps}}, State) ->
+    % Handled if reload_slots_map succeeds, so we cannot reply callers
+    % because we cannot assert spawn_reload_slots_map will exit normal
+    {noreply, State#state{slots = Slots, slots_maps = SlotsMaps}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
+
+initial_state(InitNodes) ->
+    #state{
+        slots = undefined,
+        slots_maps = {},
+        init_nodes = [#node{address = A, port = P} || {A,P} <- InitNodes],
+        refresh_pid = undefined,
+        refresh_callers = []
+    }.
+
+spawn_reload_slots_map(#state{refresh_pid = undefined} = State) ->
+    Me = self(),
+    NewMapping = fun () -> Me ! {new_mapping, reload_slots_map(State)} end,
+    RefreshPid = proc_lib:spawn_link(NewMapping),
+    State#state{refresh_pid = RefreshPid};
+spawn_reload_slots_map(#state{refresh_pid = _} = State) ->
+    State.
+
+reply_refresh_callers(State, Reason) ->
+    Response =
+        case Reason == normal of
+            true -> {ok, State#state.refresh_pid};
+            false -> {error, Reason}
+        end,
+
+    [gen_server:reply(From, Response) || From <- State#state.refresh_callers],
+    State#state{refresh_pid = undefined, refresh_callers = []}.
 
 terminate(_Reason, _State) ->
     ok.

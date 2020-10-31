@@ -259,9 +259,8 @@ redirect_transaction(Pool, Transaction, moved) ->
     eredis_cluster_pool:transaction(Pool, Transaction);
 redirect_transaction(Pool, Transaction, ask) ->
     % ASK redirection: https://redis.io/topics/cluster-spec
-    Asking = fun(Worker) -> qw(Worker, ["ASKING"]) end,
-    eredis_cluster_pool:transaction(Pool, Asking),
-    eredis_cluster_pool:transaction(Pool, Transaction).
+    AskTransaction = fun(Worker) -> qw(Worker, ["ASKING"]), Transaction(Worker) end,
+    eredis_cluster_pool:transaction(Pool, AskTransaction).
 
 
 exponential_backoff(0) -> ok;

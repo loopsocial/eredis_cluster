@@ -106,7 +106,7 @@ qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc) ->
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
     case handle_transaction_result(Result, check_pipeline_result) of
         retry -> retry;
-        Res -> 
+        Res ->
             MappedRes = lists:zip(Mapping,Res),
             qmn2(T1, T2, MappedRes ++ Acc)
     end;
@@ -198,6 +198,7 @@ try_query(Pool, Transaction) ->
         % https://redis.io/topics/cluster-spec
         {error, <<"MOVED ", SlotAddressPort/binary>>} ->
             eredis_cluster_monitor:async_refresh_mapping(),
+            log_error(["MOVED"]),
             try_redirect(SlotAddressPort, Transaction, moved);
 
         % ASK is like MOVED but the difference is that the client should retry
@@ -205,7 +206,9 @@ try_query(Pool, Transaction) ->
         % When migration is finished, MOVED will be received and only then
         % we should refresh mapping.
         {error, <<"ASK ", SlotAddressPort/binary>>} ->
-            try_redirect(SlotAddressPort, Transaction, ask);
+            Result = try_redirect(SlotAddressPort, Transaction, ask),
+            log_error([">>>>>> ASK: ~p", [Result]]),
+            Result;
 
         Payload ->
             Payload
@@ -215,6 +218,7 @@ handle_transaction_result(Result) ->
     case Result of
         % If instance down we wait refresh finish and retry
         {error, no_connection} ->
+            log_error(["no_connection > refresh_mapping"]),
             eredis_cluster_monitor:refresh_mapping(),
             retry;
 

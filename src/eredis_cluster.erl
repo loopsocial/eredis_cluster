@@ -9,16 +9,32 @@
 -export([start/0, stop/0, connect/1]). % Application Management.
 
 % Generic redis call
--export([q/1, qp/1, qw/2, qk/2, qa/1, qmn/1, transaction/1, transaction/2]).
+-export([
+    q/1,
+    q/2,
+    qp/1,
+    qp/2,
+    qw/2,
+    qw/3,
+    qk/2,
+    qk/3,
+    qa/1,
+    qa/2,
+    qmn/1,
+    qmn/2,
+    transaction/1,
+    transaction_with_query_timeout/2,
+    transaction/2
+]).
 
 % Specific redis command implementation
--export([flushdb/0]).
+-export([flushdb/0, flushdb/1]).
 
  % Helper functions
 -export([update_key/2]).
 -export([update_hash_field/3]).
--export([optimistic_locking_transaction/3]).
--export([eval/4]).
+-export([optimistic_locking_transaction/3, optimistic_locking_transaction/4]).
+-export([eval/4, eval/5]).
 -export([log_error/1]).
 
 -include("eredis_cluster.hrl").
@@ -56,7 +72,11 @@ connect(InitServers) ->
 %% =============================================================================
 -spec transaction(redis_pipeline_command()) -> redis_transaction_result().
 transaction(Commands) ->
-    Result = q([["multi"]| Commands] ++ [["exec"]]),
+    transaction_with_query_timeout(Commands, ?DEFAULT_QUERY_TIMEOUT).
+
+-spec transaction_with_query_timeout(redis_pipeline_command(), timeout()) -> redis_transaction_result().
+transaction_with_query_timeout(Commands, Timeout) ->
+    Result = q([["multi"]| Commands] ++ [["exec"]], Timeout),
     lists:last(Result).
 
 %% =============================================================================
@@ -67,18 +87,21 @@ transaction(Commands) ->
 %% @end
 %% =============================================================================
 -spec transaction(fun((Worker::pid()) -> redis_result()), anystring()) -> any().
-transaction(Transaction, PoolKey) ->
-    Slot = get_key_slot(PoolKey),
-    transaction(Transaction, Slot, undefined, 0).
+transaction(Transaction, PoolKey) -> transaction(Transaction, PoolKey, ?DEFAULT_QUERY_TIMEOUT).
 
-transaction(Transaction, Slot, undefined, _) ->
-    query(Transaction, Slot, 0);
-transaction(Transaction, Slot, ExpectedValue, Counter) ->
-    case query(Transaction, Slot, 0) of
+-spec transaction(fun((Worker::pid()) -> redis_result()), anystring(), timeout()) -> any().
+transaction(Transaction, PoolKey, Timeout) ->
+    Slot = get_key_slot(PoolKey),
+    transaction(Transaction, Slot, undefined, 0, Timeout).
+
+transaction(Transaction, Slot, undefined, _, Timeout) ->
+    query2(Transaction, Slot, 0, Timeout);
+transaction(Transaction, Slot, ExpectedValue, Counter, Timeout) ->
+    case query2(Transaction, Slot, 0, Timeout) of
         ExpectedValue ->
-            transaction(Transaction, Slot, ExpectedValue, Counter - 1);
+            transaction(Transaction, Slot, ExpectedValue, Counter - 1, Timeout);
         {ExpectedValue, _} ->
-            transaction(Transaction, Slot, ExpectedValue, Counter - 1);
+            transaction(Transaction, Slot, ExpectedValue, Counter - 1, Timeout);
         Payload ->
             Payload
     end.
@@ -88,29 +111,32 @@ transaction(Transaction, Slot, ExpectedValue, Counter) ->
 %% @end
 %% =============================================================================
 -spec qmn(redis_pipeline_command()) -> redis_pipeline_result().
-qmn(Commands) -> qmn(Commands, 0).
+qmn(Commands) -> qmn(Commands, ?DEFAULT_QUERY_TIMEOUT).
 
-qmn(_, ?QUERY_LIMIT) ->
+-spec qmn(redis_pipeline_command(), timeout()) -> redis_pipeline_result().
+qmn(Commands, Timeout) -> qmn(Commands, 0, Timeout).
+
+qmn(_, ?QUERY_LIMIT, _Timeout) ->
     {error, no_connection};
-qmn(Commands, Counter) ->
-    exponential_backoff(Counter),
+qmn(Commands, Counter, Timeout) ->
+    exponential_backoff(Counter, Timeout),
     {CommandsByPools, MappingInfo} = split_by_pools(Commands),
 
-    case qmn2(CommandsByPools, MappingInfo, []) of
-        retry -> qmn(Commands, Counter + 1);
+    case qmn2(CommandsByPools, MappingInfo, [], Timeout) of
+        retry -> qmn(Commands, Counter + 1, Timeout);
         Res -> Res
     end.
 
-qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc) ->
-    Transaction = fun(Worker) -> qw(Worker, PoolCommands) end,
+qmn2([{Pool, PoolCommands} | T1], [{Pool, Mapping} | T2], Acc, Timeout) ->
+    Transaction = fun(Worker) -> qw(Worker, PoolCommands, Timeout) end,
     Result = eredis_cluster_pool:transaction(Pool, Transaction),
     case handle_transaction_result(Result, check_pipeline_result) of
         retry -> retry;
-        Res -> 
+        Res ->
             MappedRes = lists:zip(Mapping,Res),
-            qmn2(T1, T2, MappedRes ++ Acc)
+            qmn2(T1, T2, MappedRes ++ Acc, Timeout)
     end;
-qmn2([], [], Acc) ->
+qmn2([], [], Acc, _Timeout) ->
     SortedAcc =
         lists:sort(
             fun({Index1, _},{Index2, _}) ->
@@ -149,7 +175,10 @@ split_by_pools([], _Index, CmdAcc, MapAcc, _State) ->
 %% @end
 %% =============================================================================
 -spec qp(redis_pipeline_command()) -> redis_pipeline_result().
-qp(Commands) -> q(Commands).
+qp(Commands) -> qp(Commands, ?DEFAULT_QUERY_TIMEOUT).
+
+-spec qp(redis_pipeline_command(), timeout()) -> redis_pipeline_result().
+qp(Commands, Timeout) -> q(Commands, Timeout).
 
 %% =============================================================================
 %% @doc This function execute simple or pipelined command on a single redis node
@@ -158,34 +187,44 @@ qp(Commands) -> q(Commands).
 %% =============================================================================
 -spec q(redis_command()) -> redis_result().
 q(Command) ->
-    query(Command).
+    q(Command, ?DEFAULT_QUERY_TIMEOUT).
+
+-spec q(redis_command(), timeout()) -> redis_result().
+q(Command, Timeout) ->
+    query(Command, Timeout).
 
 -spec qk(redis_command(), bitstring()) -> redis_result().
-qk(Command, PoolKey) ->
-    query(Command, PoolKey).
+qk(Command, PoolKey) -> qk(Command, PoolKey, ?DEFAULT_QUERY_TIMEOUT).
 
-query(Command) ->
+-spec qk(redis_command(), bitstring(), timeout()) -> redis_result().
+qk(Command, PoolKey, Timeout) ->
+    query(Command, PoolKey, Timeout).
+
+-spec query(redis_command(), timeout()) -> redis_result().
+query(Command, Timeout) ->
     PoolKey = get_key_from_command(Command),
-    query(Command, PoolKey).
+    query(Command, PoolKey, Timeout).
 
-query(_, undefined) ->
+query(_, undefined, _Timeout) ->
     {error, invalid_cluster_command};
-query(Command, PoolKey) ->
+query(Command, PoolKey, Timeout) ->
     Slot = get_key_slot(PoolKey),
-    Transaction = fun(Worker) -> qw(Worker, Command) end,
-    query(Transaction, Slot, 0).
+    Transaction = fun(Worker) -> qw(Worker, Command, Timeout) end,
+    query2(Transaction, Slot, 0, Timeout).
 
-query(_, _, ?QUERY_LIMIT) ->
+query2(_, _, ?QUERY_LIMIT, _Timeout) ->
     {error, no_connection};
-query(Transaction, Slot, Counter) ->
-    exponential_backoff(Counter),
+query2(Transaction, Slot, Counter, Timeout) ->
+    case exponential_backoff(Counter, Timeout) of
+        ok ->
+            Pool = eredis_cluster_monitor:get_pool_by_slot(Slot),
+            Result = try_query(Pool, Transaction),
 
-    Pool = eredis_cluster_monitor:get_pool_by_slot(Slot),
-    Result = try_query(Pool, Transaction),
-
-    case handle_transaction_result(Result) of
-        retry -> query(Transaction, Slot, Counter + 1);
-        Payload -> Payload
+            case handle_transaction_result(Result) of
+                retry -> query2(Transaction, Slot, Counter + 1, Timeout);
+                Payload -> Payload
+            end;
+        {error, timeout} -> {error, no_connection}
     end.
 
 try_query(Pool, Transaction) ->
@@ -263,10 +302,14 @@ redirect_transaction(Pool, Transaction, ask) ->
     eredis_cluster_pool:transaction(Pool, AskTransaction).
 
 
-exponential_backoff(0) -> ok;
-exponential_backoff(Counter) ->
+exponential_backoff(0, _Timeout) -> ok;
+exponential_backoff(Counter, Timeout) ->
     Time = trunc(math:pow(?EXPONENTIAL_BACKOFF_BASE, Counter)),
-    timer:sleep(Time).
+    case Timeout < Time of
+        true -> timer:sleep(Time);
+        false -> {error, timeout}
+    end.
+
 
 %% =============================================================================
 %% @doc Update the value of a key by applying the function passed in the
@@ -317,10 +360,16 @@ update_hash_field(Key, Field, UpdateFunction) ->
     UpdateFunction::fun((redis_result()) -> redis_pipeline_command())) ->
         {redis_transaction_result(), any()}.
 optimistic_locking_transaction(WatchedKey, GetCommand, UpdateFunction) ->
+    optimistic_locking_transaction(WatchedKey, GetCommand, UpdateFunction, ?DEFAULT_QUERY_TIMEOUT).
+
+-spec optimistic_locking_transaction(Key::anystring(), redis_command(),
+    UpdateFunction::fun((redis_result()) -> redis_pipeline_command()), timeout()) ->
+        {redis_transaction_result(), any()}.
+optimistic_locking_transaction(WatchedKey, GetCommand, UpdateFunction, Timeout) ->
     Slot = get_key_slot(WatchedKey),
     Transaction = fun(Worker) ->
         %% Watch given key
-        qw(Worker,["WATCH", WatchedKey]),
+        qw(Worker,["WATCH", WatchedKey], Timeout),
         %% Get necessary information for the modifier function
         GetResult = qw(Worker, GetCommand),
         %% Execute the pipelined command as a redis transaction
@@ -330,10 +379,10 @@ optimistic_locking_transaction(WatchedKey, GetCommand, UpdateFunction) ->
             Command ->
                 {Command, undefined}
         end,
-        RedisResult = qw(Worker, [["MULTI"]] ++ UpdateCommand ++ [["EXEC"]]),
+        RedisResult = qw(Worker, [["MULTI"]] ++ UpdateCommand ++ [["EXEC"]], Timeout),
         {lists:last(RedisResult), Result}
     end,
-	case transaction(Transaction, Slot, {ok, undefined}, ?OL_TRANSACTION_TTL) of
+	case transaction(Transaction, Slot, {ok, undefined}, ?OL_TRANSACTION_TTL, Timeout) of
         {{ok, undefined}, _} ->
             {error, resource_busy};
         {{ok, TransactionResult}, UpdateResult} ->
@@ -351,6 +400,11 @@ optimistic_locking_transaction(WatchedKey, GetCommand, UpdateFunction) ->
 -spec eval(bitstring(), bitstring(), [bitstring()], [bitstring()]) ->
     redis_result().
 eval(Script, ScriptHash, Keys, Args) ->
+    eval(Script, ScriptHash, Keys, Args, ?DEFAULT_QUERY_TIMEOUT).
+
+-spec eval(bitstring(), bitstring(), [bitstring()], [bitstring()], timeout()) ->
+    redis_result().
+eval(Script, ScriptHash, Keys, Args, Timeout) ->
     KeyNb = length(Keys),
     EvalShaCommand = ["EVALSHA", ScriptHash, KeyNb] ++ Keys ++ Args,
     Key = if
@@ -361,7 +415,7 @@ eval(Script, ScriptHash, Keys, Args) ->
     case qk(EvalShaCommand, Key) of
         {error, <<"NOSCRIPT", _/binary>>} ->
             LoadCommand = ["SCRIPT", "LOAD", Script],
-            [_, Result] = qk([LoadCommand, EvalShaCommand], Key),
+            [_, Result] = qk([LoadCommand, EvalShaCommand], Key, Timeout),
             Result;
         Result ->
             Result
@@ -372,9 +426,12 @@ eval(Script, ScriptHash, Keys, Args) ->
 %% @end
 %% =============================================================================
 -spec qa(redis_command()) -> ok | {error, Reason::bitstring()}.
-qa(Command) ->
+qa(Command) -> qa(Command, ?DEFAULT_QUERY_TIMEOUT).
+
+-spec qa(redis_command(), timeout()) -> ok | {error, Reason::bitstring()}.
+qa(Command, Timeout) ->
     Pools = eredis_cluster_monitor:get_all_pools(),
-    Transaction = fun(Worker) -> qw(Worker, Command) end,
+    Transaction = fun(Worker) -> qw(Worker, Command, Timeout) end,
     [eredis_cluster_pool:transaction(Pool, Transaction) || Pool <- Pools].
 
 %% =============================================================================
@@ -384,7 +441,11 @@ qa(Command) ->
 %% =============================================================================
 -spec qw(Worker::pid(), redis_command()) -> redis_result().
 qw(Worker, Command) ->
-    eredis_cluster_pool_worker:query(Worker, Command).
+    qw(Worker, Command, ?DEFAULT_QUERY_TIMEOUT).
+
+-spec qw(Worker::pid(), redis_command(), timeout()) -> redis_result().
+qw(Worker, Command, Timeout) ->
+    eredis_cluster_pool_worker:query(Worker, Command, Timeout).
 
 %% =============================================================================
 %% @doc Perform flushdb command on each node of the redis cluster
@@ -392,7 +453,11 @@ qw(Worker, Command) ->
 %% =============================================================================
 -spec flushdb() -> ok | {error, Reason::bitstring()}.
 flushdb() ->
-    Result = qa(["FLUSHDB"]),
+    flushdb(?DEFAULT_QUERY_TIMEOUT).
+
+-spec flushdb(timeout()) -> ok | {error, Reason::bitstring()}.
+flushdb(Timeout) ->
+    Result = qa(["FLUSHDB"], Timeout),
     case proplists:lookup(error,Result) of
         none ->
             ok;

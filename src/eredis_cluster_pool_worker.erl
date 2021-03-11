@@ -4,7 +4,7 @@
 
 %% API.
 -export([start_link/1]).
--export([query/2]).
+-export([query/2, query/3]).
 
 %% gen_server.
 -export([init/1]).
@@ -37,6 +37,9 @@ init(Args) ->
     end,
 
     {ok, #state{conn=Conn}}.
+
+query(Worker, Commands, Timeout) ->
+    gen_server:call(Worker, {'query', Commands}, Timeout).
 
 query(Worker, Commands) ->
     gen_server:call(Worker, {'query', Commands}).
